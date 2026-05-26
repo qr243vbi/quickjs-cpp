@@ -497,6 +497,7 @@ public:
     return qjs::Value(ctx_, JS_GetGlobalObject(ctx_), true);
   }
 
+  
   qjs::Value getGlobal(const std::string & name){
     auto global = getGlobal();
     return global.get(name);
