@@ -14,6 +14,8 @@ class Context;
 
 class ContextGetter {
 public:
+  Context getContext();
+protected:
   virtual JSContext *context() const = 0;
 };
 
@@ -374,8 +376,16 @@ template <typename T> bool Map::set(const std::string &index, T value) {
 
 qjs::Value
 Callback::call(const Value &val, // NOLINT(misc-definitions-in-headers)
-               Array *arr) {
-  return fn(val, arr);
+               Array *array) {
+  bool delete_array = array == nullptr;
+  if (delete_array) {
+    array = newEmptyArray(ctx);
+  }
+  auto ret = fn(val, array);
+  if (delete_array) {
+    delete array;
+  }
+  return ret;
 };
 
 class PointerArray : public Array {
@@ -866,6 +876,10 @@ inline void throwIfException(JSContext *ctx, JSValueConst value) {
   }
 
   throw qjs::Exception(ctx);
+}
+
+Context ContextGetter::getContext(){ // NOLINT(misc-definitions-in-headers)
+  return qjs::Context(this->context(), false);
 }
 
 inline void throwIfException(JSContext *ctx, qjs::Value &value) {
