@@ -471,12 +471,14 @@ public:
 
 private:
   void free() {
-    for (auto iter : this->finalizer_map) {
-      auto name = iter.second.def.class_name;
-      iter.second.def.class_name = nullptr;
-      if (name != nullptr)
-        ::free((void *)name);
-    }
+        for (auto &iter : finalizer_map) {   // use reference
+            auto name = iter.second.def.class_name;
+            iter.second.def.class_name = nullptr;
+            if (name != nullptr) {
+                ::free((void *)name);        // ensure memory was dynamically allocated
+            }
+        }
+        finalizer_map.clear();
   }
 };
 
@@ -531,12 +533,9 @@ QuickJS_CppClasses *
 getClasses(JSRuntime *rt) { // NOLINT(misc-definitions-in-headers)
   auto cls = (QuickJS_CppClasses *)JS_GetRuntimeOpaque(rt);
   if (cls == nullptr) {
-    cls = (QuickJS_CppClasses *)malloc(sizeof(QuickJS_CppClasses));
+    cls = new QuickJS_CppClasses();
     finalize_pointer((void *)cls, [](void *p) -> void {
-      auto d = (QuickJS_CppClasses *)p;
-      if (d != nullptr) {
-        d->free();
-      }
+      delete static_cast<QuickJS_CppClasses*>(p);
     });
     JSClassID clsID = 0;
     JS_NewClassID(rt, &clsID);
@@ -628,8 +627,8 @@ private:
   void free() {
     if (rt_) {
       auto data = JS_GetRuntimeOpaque(rt_);
-      finalize_pointer(data);
       JS_FreeRuntime(rt_);
+      finalize_pointer(data);
     }
   }
 };
@@ -791,13 +790,13 @@ private:
     if (owned) {
       if (ctx_ != nullptr) {
         void *data = JS_GetContextOpaque(ctx_);
-        finalize_pointer(data);
         JS_FreeContext(ctx_);
+        finalize_pointer(data);
       }
       if (rt_ != nullptr) {
-        auto data = (QuickJS_CppClasses *)JS_GetRuntimeOpaque(rt_);
-        finalize_pointer(data);
+        void *data = JS_GetRuntimeOpaque(rt_);
         JS_FreeRuntime(rt_);
+        finalize_pointer(data);
       }
     }
   }
