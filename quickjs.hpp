@@ -14,7 +14,7 @@ class Context;
 
 class ContextGetter {
 public:
-  Context getContext();
+  virtual Context getContext() const;
 protected:
   virtual JSContext *context() const = 0;
 };
@@ -112,6 +112,9 @@ public:
     }
     return false;
   }
+
+  virtual Context getContext() const override;
+
   virtual size_t size() const override {
     auto ctx = context();
     if (isArray()) {
@@ -181,8 +184,7 @@ public:
 #define ASSIGN_MOVE(val)                                                       \
   {                                                                            \
     assign(val.ctx_, val.value_, false);                                       \
-    val.value_ = JS_UNDEFINED;                                                 \
-    val.ctx_ = nullptr;                                                        \
+    val.free();                                                                \
   }
 
   template <
@@ -215,6 +217,24 @@ public:
   Value(const Value &val) { assign(val); };
 
   Value(Value &&val) noexcept { ASSIGN_MOVE(val); }
+
+  void setPropertyFunc(const std::string & name, 
+      const qjs::Value& getter1, const qjs::Value& setter1, int flags = JS_PROP_ENUMERABLE){
+    auto ctx = context();
+    JSAtom atom = JS_NewAtom(ctx, name.c_str());
+    JSValue getter = getter1.rawdup();
+    JSValue setter = setter1.rawdup();
+
+    JS_DefinePropertyGetSet(ctx, raw(), atom, getter, setter, flags);
+    // only free atom
+    JS_FreeAtom(ctx, atom);
+  }
+
+  void setPropertyFunc(const std::string & name,
+    const std::function<Value(Value*)> &getter1, 
+    const std::function<Value(Value*, Value*)> &setter1,
+    int flags = JS_PROP_ENUMERABLE
+  );
 
   virtual bool set(size_t index, qjs::Value value) override {
     if (isArray()) {
@@ -781,6 +801,29 @@ private:
   }
 };
 
+  Context Value::getContext() const {  // NOLINT(misc-definitions-in-headers)
+    return this->Array::getContext();
+  }
+
+  void Value::setPropertyFunc(const std::string & name, // NOLINT(misc-definitions-in-headers)
+    const std::function<Value(Value*)> &getter1, 
+    const std::function<Value(Value*, Value*)> &setter1,
+    int flags
+  ){
+    auto ctx = getContext();
+
+    qjs::Value getter = ctx.newFunction([getter1](Value * th, Array * ar)->qjs::Value { 
+      return getter1(th); 
+    });
+
+    qjs::Value setter = ctx.newFunction([setter1](Value * th, Array * ar)->qjs::Value { 
+      qjs::Value val = ar->get(0);
+      return setter1(th, &val);
+    });
+
+    setPropertyFunc(name, getter, setter, flags);
+  };
+
 template <> inline bool Value::is<std::vector<Value>>() const {
   return isArray();
 }
@@ -918,7 +961,7 @@ inline void throwIfException(JSContext *ctx, JSValueConst value) {
   throw qjs::Exception(ctx);
 }
 
-Context ContextGetter::getContext(){ // NOLINT(misc-definitions-in-headers)
+Context ContextGetter::getContext() const { // NOLINT(misc-definitions-in-headers)
   return qjs::Context(this->context(), false);
 }
 
