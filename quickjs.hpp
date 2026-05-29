@@ -178,8 +178,9 @@ public:
                     void *opaque = nullptr) {
     if (opaque != nullptr || id != JS_INVALID_CLASS_ID) {
       assign(ctx, JS_NewObjectClass(ctx, id), true);
-      JSValue val = raw();
+      JSValue val = rawdup();
       JS_SetOpaque(val, opaque);
+      JS_FreeValue(ctx, val);
     } else {
       assign(ctx, JS_NewObject(ctx), true);
     }
@@ -540,7 +541,8 @@ getClasses(JSRuntime *rt) { // NOLINT(misc-definitions-in-headers)
   if (cls == nullptr) {
     cls = new QuickJS_CppClasses();
     finalize_pointer((void *)cls, [](void *p) -> void {
-      delete static_cast<QuickJS_CppClasses*>(p);
+      auto cls =  static_cast<QuickJS_CppClasses*>(p);
+      cls->free();
     });
     JSClassID clsID = 0;
     JS_NewClassID(rt, &clsID);
@@ -648,7 +650,7 @@ void finalize_pointer(void *ptr, std::function<void(void *)> fn) {
           iter->second(ptr);
         }
         finalizers.erase(iter);
-      }
+      } 
       free(ptr);
     } else {
       finalizers[ptr] = fn;
