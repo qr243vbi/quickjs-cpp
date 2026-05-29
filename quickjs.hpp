@@ -13,29 +13,143 @@ class Value;
 
 class Context;
 
+/**
+ * @brief Abstract interface for objects that can provide a JS context.
+ *
+ * This class is used as a base for objects that need access
+ * to a QuickJS execution context.
+ */
 class ContextGetter {
 public:
+  /**
+   * @brief Returns a Context object representing the JS execution context.
+   *
+   * @return A Context instance associated with this object.
+   */
   virtual Context getContext() const;
+
 protected:
+  /**
+   * @brief Returns the raw QuickJS context pointer.
+   *
+   * Derived classes must implement this to provide access
+   * to the underlying JSContext.
+   *
+   * @return Pointer to the JSContext.
+   */
   virtual JSContext *context() const = 0;
 };
 
+/**
+ * @brief Abstract interface representing a JavaScript-like array.
+ *
+ * Provides indexed access to elements, allowing retrieval, assignment,
+ * and querying of the array size. Works in conjunction with a JS context.
+ */
 class Array : public ContextGetter {
 public:
+  /**
+   * @brief Retrieves the value at a given index.
+   *
+   * @param index The position of the element to retrieve
+   * @return The Value at the specified index, or undefined if out-of-bounds
+   */
   virtual Value get(size_t index) const = 0;
+
+  /**
+   * @brief Sets the value at a specific index.
+   *
+   * @param index The position to set
+   * @param value The Value to assign
+   * @return true if the assignment was successful, false otherwise
+   */
   virtual bool set(size_t index, Value value) = 0;
+
+  /**
+   * @brief Returns the number of elements in the array.
+   *
+   * @return The size of the array
+   */
   virtual size_t size() const = 0;
-  template <typename T> bool set(size_t index, T value);
+
+  /**
+   * @brief Template convenience function to assign any C++ type at an index.
+   *
+   * Converts the provided value to a qjs::Value using the current context.
+   *
+   * @tparam T Any type convertible to qjs::Value
+   * @param index The array index
+   * @param value The value to assign
+   * @return true if the assignment succeeded
+   */
+  template <typename T>
+  bool set(size_t index, T value);
+
+  /// @brief Virtual destructor for safe polymorphic destruction
   virtual ~Array() = default;
 };
 
+/**
+ * @brief Abstract interface for JavaScript-like object (key-value map) access.
+ *
+ * This class represents an object that exposes string-keyed properties,
+ * similar to a JavaScript object. It provides basic operations for:
+ * - Retrieving properties by name
+ * - Setting properties
+ * - Removing properties
+ * - Querying the number of properties
+ *
+ * Derived classes are expected to implement storage and lifecycle semantics.
+ */
 class Map : public ContextGetter {
 public:
+  /**
+   * @brief Retrieves a value by property name.
+   *
+   * @param name The property key to look up
+   * @return The value associated with the key, or JS undefined if not found
+   */
   virtual qjs::Value get(const std::string &name) const = 0;
+
+  /**
+   * @brief Sets a property value by name.
+   *
+   * @param index The property key to set
+   * @param value The value to assign
+   * @return true if the operation succeeded, false otherwise
+   */
   virtual bool set(const std::string &index, qjs::Value value) = 0;
+
+  /**
+   * @brief Removes a property from the object.
+   *
+   * @param index The property key to remove
+   * @return true if the property was removed, false if it did not exist or could not be removed
+   */
   virtual bool drop(const std::string &index) = 0;
+
+  /**
+   * @brief Returns the number of properties in the map.
+   *
+   * @return The number of enumerable or stored properties
+   */
   virtual size_t size() const = 0;
-  template <typename T> bool set(const std::string &index, T value);
+
+  /**
+   * @brief Convenience setter for arbitrary C++ value types.
+   *
+   * Converts the given value into a qjs::Value using the current context
+   * and stores it under the specified key.
+   *
+   * @tparam T Any type convertible to qjs::Value
+   * @param index The property key
+   * @param value The value to assign
+   * @return true if the assignment succeeded
+   */
+  template <typename T>
+  bool set(const std::string &index, T value);
+
+  /// @brief Virtual destructor for safe polymorphic destruction
   virtual ~Map() = default;
 };
 
@@ -45,37 +159,114 @@ constexpr bool is_array_or_derived = std::is_base_of<Array, T>::value;
 template <typename T>
 using is_not_array = std::integral_constant<bool, !is_array_or_derived<T>>;
 
+/**
+ * @brief Abstract representation of a JavaScript callable function.
+ *
+ * This class models a JS function object that can be invoked from C++.
+ * It provides a unified interface for calling functions with different
+ * argument styles and supports integration with QuickJS.
+ *
+ * Derived classes must implement the `call()` method.
+ */
 class Function : public ContextGetter {
 public:
 
-template <typename Array, 
-  std::enable_if_t<(is_array_or_derived<Array> ), int> = 0 > 
-qjs::Value invoke(qjs::Value *th, Array* xs);
+  /**
+   * @brief Invokes the function with an explicit this-value and argument array.
+   *
+   * @tparam Array A type derived from qjs::Array
+   * @param th The JavaScript `this` value
+   * @param xs Argument array
+   * @return Result of function execution
+   */
+  template <typename Array,
+    std::enable_if_t<(is_array_or_derived<Array>), int> = 0>
+  qjs::Value invoke(qjs::Value *th, Array* xs);
 
-qjs::Value invoke();
+  /**
+   * @brief Invokes the function with no arguments and default this-value.
+   *
+   * @return Result of function execution
+   */
+  qjs::Value invoke();
 
 #ifndef _MSC_VER
-template <typename... T,
-          std::enable_if_t<(is_not_array<T>::value && ...), int> = 0>
-qjs::Value invoke(qjs::Value *th, T... xs);
+  /**
+   * @brief Invokes the function with variadic arguments and explicit this-value.
+   *
+   * Arguments are automatically packed into a temporary Array implementation.
+   *
+   * @tparam T Argument types (must not be Array types)
+   * @param th The JavaScript `this` value
+   * @param xs Variadic arguments to pass to the function
+   * @return Result of function execution
+   */
+  template <typename... T,
+            std::enable_if_t<(is_not_array<T>::value && ...), int> = 0>
+  qjs::Value invoke(qjs::Value *th, T... xs);
 #endif
 
+  /// @brief Virtual destructor for safe polymorphic destruction
   virtual ~Function() = default;
+
 protected:
+  /**
+   * @brief Executes the underlying function implementation.
+   *
+   * @param this_val The JavaScript `this` value
+   * @param p Argument array (may be null)
+   * @return Result of execution as a qjs::Value
+   */
   virtual qjs::Value call(qjs::Value *, qjs::Array * p = nullptr) = 0;
 };
 
+
+/**
+ * @brief Concrete Function implementation backed by a std::function callback.
+ *
+ * This class allows C++ lambdas or std::function objects to be exposed
+ * as JavaScript-callable functions inside QuickJS.
+ */
 class Callback : public Function {
 public:
+
+  /**
+   * @brief Constructs a Callback bound to a QuickJS context.
+   *
+   * @param ctx JSContext used for execution
+   */
   Callback(JSContext *ctx) { this->ctx = ctx; }
+
+  /**
+   * @brief User-defined function implementation.
+   *
+   * The callable receives:
+   * - this-value
+   * - argument array
+   *
+   * and returns a qjs::Value result.
+   */
   std::function<Value(qjs::Value *, qjs::Array *)> fn;
+
 protected:
+  /**
+   * @brief Executes the stored std::function callback.
+   *
+   * @param val JavaScript this-value
+   * @param arr Argument array
+   * @return Result of callback execution
+   */
   virtual qjs::Value call(qjs::Value *val, qjs::Array *arr = nullptr) override;
 
 private:
   JSContext *ctx;
 
 protected:
+  /**
+   * @brief Returns the associated QuickJS context.
+   *
+   * @return JSContext pointer
+   */
   virtual JSContext *context() const override { return ctx; }
 };
 
@@ -84,9 +275,27 @@ static JSValue js_function_trampoline(JSContext *ctx, JSValueConst this_val,
                                       JSValueConst *data);
 
 static Array *newEmptyArray(JSContext *);
-
+/**
+ * @brief Represents a JavaScript value in C++.
+ *
+ * This class wraps QuickJS JSValue objects and provides a unified interface
+ * for arrays, maps (objects), and functions. It inherits from Array, Map,
+ * and Function, allowing array-like, object-like, and callable behavior.
+ *
+ * It supports creation, assignment, property access, type checking, and
+ * automatic memory management for JSValues.
+ */
 class Value : public Array, public Map, public Function {
 protected:
+  /**
+   * @brief Calls this value as a JavaScript function.
+   *
+   * @param val The JS `this` value for the function call.
+   * @param array Optional array of arguments.
+   * @return Result of the function call as a Value.
+   *
+   * Returns `undefined` if the value is not a function.
+   */
   virtual Value call(qjs::Value *val, Array *array = nullptr) override {
     auto ctx = context();
     if (!isFunction()) {
@@ -106,6 +315,12 @@ protected:
     return Value(ctx, result, true);
   }
 public:
+  /**
+   * @brief Deletes a property from an object.
+   *
+   * @param val Name of the property to delete.
+   * @return true if the property was deleted, false otherwise.
+   */
   virtual bool drop(const std::string &val) override {
     if (isObject()) {
       auto ctx = context();
@@ -118,8 +333,18 @@ public:
     return false;
   }
 
+  /**
+   * @brief Returns the associated context.
+   *
+   * @return The JS context associated with this Value.
+   */
   virtual Context getContext() const override;
 
+  /**
+   * @brief Returns the size of an array or object.
+   *
+   * @return Array length, object property count, or 0 for other types.
+   */
   virtual size_t size() const override {
     auto ctx = context();
     if (isArray()) {
@@ -141,7 +366,14 @@ public:
       return 0;
     }
   }
-
+  /**
+   * @brief Converts JS function arguments to a vector of Values.
+   *
+   * @param ctx QuickJS context.
+   * @param argc Number of arguments.
+   * @param argv Array of JSValueConst arguments.
+   * @return Vector of wrapped qjs::Value objects.
+   */
   static std::vector<qjs::Value> makeVector(JSContext *ctx, int argc,
                                             JSValueConst *argv) {
     std::vector<qjs::Value> out;
@@ -154,6 +386,13 @@ public:
     return out;
   }
 
+  /**
+   * @brief Assigns a JSValue to this Value instance.
+   *
+   * @param ctx QuickJS context.
+   * @param value JSValue to assign.
+   * @param takeOwnership If true, this object takes ownership of the value.
+   */
   void assign(JSContext *ctx, JSValue value, bool takeOwnership) {
     free();
     ctx_ = ctx;
@@ -164,17 +403,41 @@ public:
     }
   }
 
+  /**
+   * @brief Assigns a numeric value.
+   *
+   * @param ctx QuickJS context.
+   * @param value Double value to wrap.
+   */
   void assign(JSContext *ctx, double value) {
     assign(ctx, JS_NewFloat64(ctx, value), true);
   }
 
+  /**
+   * @brief Assigns a string value.
+   *
+   * @param ctx QuickJS context.
+   * @param value String to wrap.
+   */
   void assign(JSContext *ctx, const std::string &value) {
     JSValue v = JS_NewStringLen(ctx, value.c_str(), value.size());
     assign(ctx, v, true); // consumes v
   }
 
+  /**
+   * @brief Assigns an empty JS array.
+   *
+   * @param ctx QuickJS context.
+   */
   void assignArray(JSContext *ctx) { assign(ctx, JS_NewArray(ctx), true); }
 
+  /**
+   * @brief Assigns an empty JS object.
+   *
+   * @param ctx QuickJS context.
+   * @param id Optional class ID for the object.
+   * @param opaque Optional pointer to associate with the object.
+   */
   void assignObject(JSContext *ctx, JSClassID id = JS_INVALID_CLASS_ID,
                     void *opaque = nullptr) {
     if (opaque != nullptr || id != JS_INVALID_CLASS_ID) {
@@ -224,6 +487,15 @@ public:
 
   Value(Value &&val) noexcept { ASSIGN_MOVE(val); }
 
+
+  /**
+   * @brief Sets a getter and setter function on a property.
+   *
+   * @param name Property name.
+   * @param getter Getter Value.
+   * @param setter Setter Value.
+   * @param flags JS property flags.
+   */
   void setPropertyFunc(const std::string & name, 
       const qjs::Value& getter1, const qjs::Value& setter1, int flags = JS_PROP_ENUMERABLE){
     auto ctx = context();
@@ -236,12 +508,27 @@ public:
     JS_FreeAtom(ctx, atom);
   }
 
+  /**
+   * @brief Sets a property with functional getter/setter.
+   *
+   * @param name Property name.
+   * @param getter Getter function.
+   * @param setter Setter function.
+   * @param flags JS property flags.
+   */
   void setPropertyFunc(const std::string & name,
     const std::function<Value(Value*)> &getter1, 
     const std::function<Value(Value*, Value*)> &setter1,
     int flags = JS_PROP_ENUMERABLE
   );
 
+  /**
+   * @brief Sets an element in an array.
+   *
+   * @param index Index in the array.
+   * @param value Value to set.
+   * @return true on success, false if not an array.
+   */
   virtual bool set(size_t index, qjs::Value value) override {
     if (isArray()) {
       auto ctx = context();
@@ -253,6 +540,13 @@ public:
     }
   }
 
+  /**
+   * @brief Sets a property in an object.
+   *
+   * @param index Property name.
+   * @param value Value to set.
+   * @return true on success, false if not an object.
+   */
   virtual bool set(const std::string &index, qjs::Value value) override {
     if (isObject()) {
       JS_SetPropertyStr(context(), raw(), index.c_str(), value.rawdup());
@@ -262,6 +556,12 @@ public:
     }
   }
 
+  /**
+   * @brief Gets an element from an array.
+   *
+   * @param index Index in the array.
+   * @return Value at the index, or undefined if not an array.
+   */
   virtual qjs::Value get(size_t index) const override {
     auto ctx = context();
     if (isArray()) {
@@ -280,6 +580,12 @@ public:
     return set(index, qjs::Value(context(), value));
   }
 
+  /**
+   * @brief Gets a property from an object.
+   *
+   * @param name Property name.
+   * @return Value of the property, or undefined if not an object.
+   */
   virtual qjs::Value get(const std::string &name) const override {
     auto ctx = context();
     if (isObject()) {
