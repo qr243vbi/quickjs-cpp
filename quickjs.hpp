@@ -19,17 +19,16 @@ class Array {
   virtual ~Array() = default;
   protected:
   virtual JSContext * context() const = 0;
-  
 };
 
-class Object {
+class Map {
   public:
   virtual qjs::Value get(const std::string & name) const = 0;
   virtual bool set(const std::string& index, qjs::Value value) = 0;
   virtual bool drop(const std::string& index) = 0;
   virtual size_t size() const = 0;
   template <typename T> bool set(const std::string& index, T value);
-  virtual ~Object() = default;
+  virtual ~Map() = default;
   protected:
   virtual JSContext * context() const = 0;
 };
@@ -49,7 +48,7 @@ static JSValue js_function_trampoline(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv,
                              int magic, JSValueConst *data);
 
-class Value : public Array, public Object, public Function{
+class Value : public Array, public Map, public Function{
 public:
   virtual bool drop(const std::string & val) override {
     if (isObject()){
@@ -139,8 +138,14 @@ public:
     assign(ctx, JS_NewArray(ctx), true);
   }
 
-  void assignObject(JSContext *ctx){
-    assign(ctx, JS_NewArray(ctx), true);
+  void assignObject(JSContext *ctx, JSClassID id = JS_INVALID_CLASS_ID, void * opaque = nullptr){
+    if (opaque != nullptr || id != JS_INVALID_CLASS_ID){
+      assign(ctx, JS_NewObjectClass(ctx, id), true);
+      JSValue val = raw();
+      JS_SetOpaque(val, opaque);
+    } else {
+      assign(ctx, JS_NewObject(ctx), true);
+    }
   }
 
   #define ASSIGN_MOVE(val) {                \
@@ -213,7 +218,6 @@ public:
     }
   }
 
-
   template <typename T> bool set(size_t index, T value){
     return set(index, qjs::Value(context(), value));
   }
@@ -230,6 +234,23 @@ public:
     } else {
         return Value(ctx, JS_UNDEFINED, true);
     }
+  }
+
+  typedef JSClassID ClassID;
+
+  void * as(ClassID classid) {
+    if (classid == JS_INVALID_CLASS_ID){
+      return nullptr;
+    }
+    return JS_GetOpaque(value_, classid);
+  }
+
+  bool is(ClassID classid) {
+    return as(classid) != nullptr;
+  }
+
+  ClassID getClassID(){
+    return JS_GetClassID(value_);
   }
 
   template <typename T> bool is() const;
@@ -285,7 +306,7 @@ protected:
     return set(index, qjs::Value(context(), value));
   }
 
-  template <typename T> bool Object::set(const std::string &index, T value){
+  template <typename T> bool Map::set(const std::string &index, T value){
     return set(index, qjs::Value(context(), value));
   }
 
@@ -327,8 +348,34 @@ class PointerArray: public Array {
   JSContext * ctx;
 };
 
+
+static void object_finalizer(JSRuntime * rt, JSValue val);
+
+struct ClassHeap {
+  JSClassDef def;
+  std::function<void(void*)> finalize;
+  void operator () (void* p) {
+    if (finalize != nullptr){
+      finalize(p);
+    }
+  }
+  ClassHeap(const std::string & name, const std::function<void(void*)> & func){
+    def.class_name = strdup(name.c_str());
+    def.finalizer = object_finalizer;
+    finalize = func;
+  }
+};
+
 struct QuickJS_CppClasses {
   JSClassID function_class;
+  std::unordered_map<JSClassID, ClassHeap> finalizer_map;
+
+  ~QuickJS_CppClasses(){
+    for (auto ptr: finalizer_map){
+      free((void*)ptr.second.def.class_name) ;
+    }
+    finalizer_map.clear();
+  }
 };
 
 static void function_finalizer(JSRuntime *rt, JSValue val);
@@ -347,6 +394,17 @@ static QuickJS_CppClasses * getClasses (JSRuntime * rt) {
     JS_SetRuntimeOpaque(rt, cls);
   }
   return cls;
+}
+
+void object_finalizer(JSRuntime * rt, JSValue val){ 
+  JSClassID cls = JS_GetClassID(val);
+  if (cls != JS_INVALID_CLASS_ID){
+    auto opaque = getClasses(rt);
+    auto iter = opaque->finalizer_map.find(cls);
+    if (iter != opaque->finalizer_map.end()){
+      iter->second(JS_GetOpaque(val, cls));
+    }
+  }
 }
 
 static QuickJS_CppClasses * getClasses (JSContext * rt) {
@@ -383,9 +441,9 @@ public:
 
   ~Runtime() {
     if (rt_) {
-      void *data = JS_GetRuntimeOpaque(rt_);
-      if (data) {
-        free(data);
+      auto data = (QuickJS_CppClasses*) JS_GetRuntimeOpaque(rt_);
+      if (data != nullptr) {
+        delete data;
       }
       JS_FreeRuntime(rt_);
     }
@@ -441,9 +499,9 @@ public:
       JS_FreeContext(ctx_);
     }
     if (rt_ != nullptr){
-      void *data = JS_GetRuntimeOpaque(rt_);
+      auto data = (QuickJS_CppClasses*) JS_GetRuntimeOpaque(rt_);
       if (data) {
-        free(data);
+        delete data;
       }
       JS_FreeRuntime(rt_);
     }
@@ -456,6 +514,20 @@ public:
 
   template<typename T> qjs::Value newValue(T t){
     return qjs::Value(ctx_, t);
+  }
+
+  JSClassID newClassID(const std::string & name, const std::function<void(void*)> &finalizer){
+    auto classmap = getClasses(ctx_);
+    JSClassID id ;
+    auto runtime = JS_GetRuntime(ctx_);
+    JS_NewClassID(runtime, &id);
+    auto pair = classmap->finalizer_map.emplace(
+      std::piecewise_construct,
+    std::forward_as_tuple(id),
+    std::forward_as_tuple(name, finalizer)
+    );
+    JS_NewClass(runtime, id, &pair.first->second.def);
+    return id;
   }
 
   qjs::Value newFunction(qjs::Function * fn)
@@ -524,9 +596,9 @@ public:
     return setGlobal(name, qjs::Value(ctx_, val));
   };
 
-  qjs::Value newObject() {
+  qjs::Value newObject(JSClassID id = JS_INVALID_CLASS_ID, void * opaque = nullptr) {
     qjs::Value val;
-    val.assignObject(ctx_);
+    val.assignObject(ctx_, id, opaque);
     return val;
   }
 
