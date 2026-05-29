@@ -38,18 +38,34 @@ public:
   virtual ~Map() = default;
 };
 
+template <typename T>
+constexpr bool is_array_or_derived = std::is_base_of<Array, T>::value;
+
 class Function : public ContextGetter {
 public:
-  virtual qjs::Value call(const Value &, Array *) = 0;
-  template <typename... T> qjs::Value invoke(const Value &th, T... xs);
+
+template <typename T, 
+  std::enable_if_t<(is_array_or_derived<T> ), int> = 0 > 
+qjs::Value invoke(qjs::Value *th, T* xs);
+
+qjs::Value invoke();
+
+template <typename... T, 
+  std::enable_if_t<(!is_array_or_derived<T> &&...), int> = 0 > 
+qjs::Value invoke(qjs::Value *th, T... xs);
+
+
   virtual ~Function() = default;
+protected:
+  virtual qjs::Value call(qjs::Value *, qjs::Array * p = nullptr) = 0;
 };
 
 class Callback : public Function {
 public:
   Callback(JSContext *ctx) { this->ctx = ctx; }
-  std::function<Value(const Value &, Array *)> fn;
-  virtual qjs::Value call(const Value &val, Array *arr) override;
+  std::function<Value(qjs::Value *, qjs::Array *)> fn;
+protected:
+  virtual qjs::Value call(qjs::Value *val, qjs::Array *arr = nullptr) override;
 
 private:
   JSContext *ctx;
@@ -65,6 +81,25 @@ static JSValue js_function_trampoline(JSContext *ctx, JSValueConst this_val,
 static Array *newEmptyArray(JSContext *);
 
 class Value : public Array, public Map, public Function {
+protected:
+  virtual Value call(qjs::Value *val, Array *array = nullptr) override {
+    auto ctx = context();
+    if (!isFunction()) {
+      return Value(ctx, JS_UNDEFINED, true);
+    }
+    auto func = raw();
+    auto size = array->size();
+    JSValueConst *argv = new JSValueConst[size];
+
+    for (int i = 0; i < size; i++) {
+      argv[i] = array->get(i).raw();
+    }
+
+    JSValue result = JS_Call(ctx, func, val->raw(), array->size(), argv);
+    delete[] argv;
+
+    return Value(ctx, result, true);
+  }
 public:
   virtual bool drop(const std::string &val) override {
     if (isObject()) {
@@ -77,32 +112,6 @@ public:
     }
     return false;
   }
-  virtual Value call(const Value &val, Array *array) override {
-    auto ctx = context();
-    if (!isFunction()) {
-      return Value(ctx, JS_UNDEFINED, true);
-    }
-    bool delete_array = array == nullptr;
-    if (delete_array) {
-      array = newEmptyArray(ctx);
-    }
-
-    auto func = raw();
-    auto size = array->size();
-    JSValueConst *argv = new JSValueConst[size];
-
-    for (int i = 0; i < size; i++) {
-      argv[i] = array->get(i).raw();
-    }
-
-    JSValue result = JS_Call(ctx, func, val.raw(), array->size(), argv);
-    delete[] argv;
-    if (delete_array) {
-      delete array;
-    }
-    return Value(ctx, result, true);
-  }
-
   virtual size_t size() const override {
     auto ctx = context();
     if (isArray()) {
@@ -179,6 +188,7 @@ public:
   template <
       typename T,
       std::enable_if_t<!std::is_same_v<std::decay_t<T>, Value>, int> = 0,
+      std::enable_if_t<!is_array_or_derived<std::decay_t<T>>, int> = 0,
       std::enable_if_t<!std::is_same_v<std::decay_t<T>, JSValue>, int> = 0>
   Value(JSContext *ctx, T t) {
     assign(ctx, t);
@@ -356,16 +366,6 @@ newEmptyArray(JSContext *context) { // NOLINT(misc-definitions-in-headers)
   return new VectorArray(context);
 }
 
-template <typename... T> qjs::Value Function::invoke(const Value &th, T... Ts) {
-
-  auto context = this->context();
-  VectorArray v(context);
-  v.reserve(sizeof...(T));
-
-  (v.emplace_back(context, std::forward<T>(Ts)), ...);
-  return this->call(th, &v);
-};
-
 template <typename T> bool Array::set(size_t index, T value) {
   return set(index, qjs::Value(context(), value));
 }
@@ -375,7 +375,7 @@ template <typename T> bool Map::set(const std::string &index, T value) {
 }
 
 qjs::Value
-Callback::call(const Value &val, // NOLINT(misc-definitions-in-headers)
+Callback::call(Value *val, // NOLINT(misc-definitions-in-headers)
                Array *array) {
   bool delete_array = array == nullptr;
   if (delete_array) {
@@ -460,6 +460,46 @@ private:
   }
 };
 
+qjs::Value Function::invoke(){ // NOLINT(misc-definitions-in-headers)
+  return this->invoke(nullptr, (Array*)nullptr);
+}
+
+template <typename T, std::enable_if_t<(is_array_or_derived<T> ), int> >
+qjs::Value Function::invoke(Value *th, T* Ts) {
+    bool delete_array = Ts == nullptr;
+    bool delete_value = th == nullptr;
+    Array * arr;
+    
+    if (delete_array) {
+      arr = newEmptyArray(this->context());
+    } else {
+      arr = Ts;
+    }
+
+    if (delete_value){
+      th = new qjs::Value(this->context(), JS_UNDEFINED, false);
+    }
+
+    auto ret = this->call(th, arr);
+    if (delete_value){
+      delete th;
+    }
+    if (delete_array){
+      delete arr;
+    }
+    return ret;
+};
+
+template <typename... T,   std::enable_if_t<(!is_array_or_derived<T> &&...), int> >
+qjs::Value Function::invoke(Value *th, T... Ts) {
+  auto context = this->context();
+  VectorArray v(context);
+  v.reserve(sizeof...(T));
+
+  (v.emplace_back(context, std::forward<T>(Ts)), ...);
+  return this->invoke(th, &v);
+};
+
 static void function_finalizer(JSRuntime *rt, JSValue val);
 
 static JSClassDef function_def = {"qr243vbi_function", function_finalizer};
@@ -514,7 +554,7 @@ JSValue js_function_trampoline(
   {
     auto thisval = Value(ctx, this_val, false);
     {
-      auto retval = cb->call(thisval, ptr.get());
+      auto retval = cb->invoke(&thisval, ptr.get());
       retvaljs = retval.rawdup();
     }
   }
@@ -667,7 +707,7 @@ public:
     return Value(ctx, func, true);
   }
 
-  qjs::Value newFunction(std::function<Value(const Value &, Array *)> fn) {
+  qjs::Value newFunction(std::function<Value(Value *, Array *)> fn) {
     auto call = new Callback(this->ctx_);
     call->fn = fn;
     return newFunction(call);
