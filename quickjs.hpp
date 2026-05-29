@@ -684,8 +684,16 @@ public:
 
   ~Context() { free(); }
 
-  Context(const Context &) = delete;
-  Context &operator=(const Context &) = delete;
+
+  #define CONTEXT_ASSIGN_MOVE(val) this->ctx_ = val.ctx_; this->rt_ = val.rt_; this->owned = val.owned; val.owned = false;
+
+  Context &operator=(Context &&val) noexcept {
+    CONTEXT_ASSIGN_MOVE(val);
+    return *this;
+  }
+
+  Context(Context &&val) noexcept { CONTEXT_ASSIGN_MOVE(val); }
+
 
   JSContext *get() const { return ctx_; }
 
