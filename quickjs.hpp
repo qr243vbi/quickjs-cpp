@@ -1,100 +1,120 @@
 #pragma once
 
+#include <functional>
 #include <map>
 #include <memory>
 #include <quickjs.h>
 #include <stdexcept>
 #include <vector>
-#include <functional>
 namespace qjs {
-  
+
 class Value;
 
-class Array {
-  public:
+class Context;
+
+class ContextGetter {
+public:
+  virtual JSContext *context() const = 0;
+};
+
+class Array : public ContextGetter {
+public:
   virtual Value get(size_t index) const = 0;
   virtual bool set(size_t index, Value value) = 0;
   virtual size_t size() const = 0;
   template <typename T> bool set(size_t index, T value);
   virtual ~Array() = default;
-  protected:
-  virtual JSContext * context() const = 0;
 };
 
-class Map {
-  public:
-  virtual qjs::Value get(const std::string & name) const = 0;
-  virtual bool set(const std::string& index, qjs::Value value) = 0;
-  virtual bool drop(const std::string& index) = 0;
+class Map : public ContextGetter {
+public:
+  virtual qjs::Value get(const std::string &name) const = 0;
+  virtual bool set(const std::string &index, qjs::Value value) = 0;
+  virtual bool drop(const std::string &index) = 0;
   virtual size_t size() const = 0;
-  template <typename T> bool set(const std::string& index, T value);
+  template <typename T> bool set(const std::string &index, T value);
   virtual ~Map() = default;
-  protected:
-  virtual JSContext * context() const = 0;
 };
 
-class Function {
-  public:
-  virtual qjs::Value call(const Value&, Array*) = 0;
+class Function : public ContextGetter {
+public:
+  virtual qjs::Value call(const Value &, Array *) = 0;
+  template <typename... T> qjs::Value invoke(const Value &th, T... xs);
   virtual ~Function() = default;
 };
 
-struct Callback: public Function {
-  std::function<Value(const Value&, Array*)> fn;
-  virtual qjs::Value call(const Value& val, Array*arr) override ;
+class Callback : public Function {
+public:
+  Callback(JSContext *ctx) { this->ctx = ctx; }
+  std::function<Value(const Value &, Array *)> fn;
+  virtual qjs::Value call(const Value &val, Array *arr) override;
+
+private:
+  JSContext *ctx;
+
+protected:
+  virtual JSContext *context() const override { return ctx; }
 };
 
 static JSValue js_function_trampoline(JSContext *ctx, JSValueConst this_val,
-                             int argc, JSValueConst *argv,
-                             int magic, JSValueConst *data);
+                                      int argc, JSValueConst *argv, int magic,
+                                      JSValueConst *data);
 
-class Value : public Array, public Map, public Function{
+static Array *newEmptyArray(JSContext *);
+
+class Value : public Array, public Map, public Function {
 public:
-  virtual bool drop(const std::string & val) override {
-    if (isObject()){
+  virtual bool drop(const std::string &val) override {
+    if (isObject()) {
       auto ctx = context();
-      if (JS_DeleteProperty(ctx, raw(), JS_NewAtomLen(ctx, val.c_str(), val.size()), 0) == true){
+      if (JS_DeleteProperty(ctx, raw(),
+                            JS_NewAtomLen(ctx, val.c_str(), val.size()),
+                            0) == true) {
         return true;
       };
     }
     return false;
   }
-  virtual Value call(const Value& val, Array * array) override {
+  virtual Value call(const Value &val, Array *array) override {
     auto ctx = context();
-    if (!isFunction()){
+    if (!isFunction()) {
       return Value(ctx, JS_UNDEFINED, true);
     }
+    bool delete_array = array == nullptr;
+    if (delete_array) {
+      array = newEmptyArray(ctx);
+    }
+
     auto func = raw();
     auto size = array->size();
-    JSValueConst * argv = new JSValueConst[size];
+    JSValueConst *argv = new JSValueConst[size];
 
-    for (int i = 0; i < size; i ++){
+    for (int i = 0; i < size; i++) {
       argv[i] = array->get(i).raw();
     }
 
     JSValue result = JS_Call(ctx, func, val.raw(), array->size(), argv);
-    delete [] argv;
+    delete[] argv;
+    if (delete_array) {
+      delete array;
+    }
     return Value(ctx, result, true);
   }
 
   virtual size_t size() const override {
     auto ctx = context();
-    if (isArray()){
+    if (isArray()) {
       uint32_t len;
       JSValue length_val = JS_GetPropertyStr(ctx, raw(), "length");
       JS_ToUint32(ctx, &len, length_val);
       JS_FreeValue(ctx, length_val);
       return len;
-    } else if (isObject()){
+    } else if (isObject()) {
       JSPropertyEnum *props;
       uint32_t prop_count = 0;
-        if (JS_GetOwnPropertyNames(
-          ctx,
-          &props,
-          &prop_count,
-          raw(),
-          JS_GPN_STRING_MASK | JS_GPN_SYMBOL_MASK
-        ) == 0) {
+      if (JS_GetOwnPropertyNames(ctx, &props, &prop_count, raw(),
+                                 JS_GPN_STRING_MASK | JS_GPN_SYMBOL_MASK) ==
+          0) {
         js_free(ctx, props);
       }
       return prop_count;
@@ -118,28 +138,27 @@ public:
   void assign(JSContext *ctx, JSValue value, bool takeOwnership) {
     free();
     ctx_ = ctx;
-    if (takeOwnership){
+    if (takeOwnership) {
       value_ = value;
     } else {
-      value_ = JS_DupValue(ctx, value);    
+      value_ = JS_DupValue(ctx, value);
     }
   }
 
-  void assign(JSContext *ctx, double value){
+  void assign(JSContext *ctx, double value) {
     assign(ctx, JS_NewFloat64(ctx, value), true);
   }
 
-  void assign(JSContext *ctx, const std::string& value) {
+  void assign(JSContext *ctx, const std::string &value) {
     JSValue v = JS_NewStringLen(ctx, value.c_str(), value.size());
     assign(ctx, v, true); // consumes v
   }
 
-  void assignArray(JSContext *ctx){
-    assign(ctx, JS_NewArray(ctx), true);
-  }
+  void assignArray(JSContext *ctx) { assign(ctx, JS_NewArray(ctx), true); }
 
-  void assignObject(JSContext *ctx, JSClassID id = JS_INVALID_CLASS_ID, void * opaque = nullptr){
-    if (opaque != nullptr || id != JS_INVALID_CLASS_ID){
+  void assignObject(JSContext *ctx, JSClassID id = JS_INVALID_CLASS_ID,
+                    void *opaque = nullptr) {
+    if (opaque != nullptr || id != JS_INVALID_CLASS_ID) {
       assign(ctx, JS_NewObjectClass(ctx, id), true);
       JSValue val = raw();
       JS_SetOpaque(val, opaque);
@@ -148,30 +167,27 @@ public:
     }
   }
 
-  #define ASSIGN_MOVE(val) {                \
-    assign(val.ctx_, val.value_, false);    \
-    val.value_ = JS_UNDEFINED;              \
-    val.ctx_ = nullptr;                     \
+#define ASSIGN_MOVE(val)                                                       \
+  {                                                                            \
+    assign(val.ctx_, val.value_, false);                                       \
+    val.value_ = JS_UNDEFINED;                                                 \
+    val.ctx_ = nullptr;                                                        \
   }
 
   template <
-    typename T,
-    std::enable_if_t<!std::is_same_v<std::decay_t<T>, Value>, int> = 0,
-    std::enable_if_t<!std::is_same_v<std::decay_t<T>, JSValue>, int> = 0
-  >   
-  Value(JSContext *ctx, T t){
+      typename T,
+      std::enable_if_t<!std::is_same_v<std::decay_t<T>, Value>, int> = 0,
+      std::enable_if_t<!std::is_same_v<std::decay_t<T>, JSValue>, int> = 0>
+  Value(JSContext *ctx, T t) {
     assign(ctx, t);
   }
 
-  void assign(const Value &val) {
-    assign(val.ctx_, val.value_, false);
-  }
+  void assign(const Value &val) { assign(val.ctx_, val.value_, false); }
 
-  Value(){
-  }
+  Value() {}
 
-  Value(JSContext *ctx, JSValue value, bool takeOwnership) { 
-    assign(ctx, value, takeOwnership); 
+  Value(JSContext *ctx, JSValue value, bool takeOwnership) {
+    assign(ctx, value, takeOwnership);
   }
 
   Value &operator=(Value &&val) noexcept {
@@ -189,69 +205,65 @@ public:
   Value(Value &&val) noexcept { ASSIGN_MOVE(val); }
 
   virtual bool set(size_t index, qjs::Value value) override {
-    if (isArray()){
-        auto ctx = context();
-        auto val = raw();
-        JS_SetPropertyUint32(ctx, val, index, value.rawdup());
-        return true;
+    if (isArray()) {
+      auto ctx = context();
+      auto val = raw();
+      JS_SetPropertyUint32(ctx, val, index, value.rawdup());
+      return true;
     } else {
-        return false;
+      return false;
     }
   }
 
-  virtual bool set(const std::string& index, qjs::Value value) override {
-    if (isObject()){
-        JS_SetPropertyStr(context(), raw(), index.c_str(), value.rawdup());
-        return true;
+  virtual bool set(const std::string &index, qjs::Value value) override {
+    if (isObject()) {
+      JS_SetPropertyStr(context(), raw(), index.c_str(), value.rawdup());
+      return true;
     } else {
-        return false;
+      return false;
     }
   }
 
   virtual qjs::Value get(size_t index) const override {
     auto ctx = context();
-    if (isArray()){
-        auto new_val = JS_GetPropertyUint32(ctx, raw(), index);
-        return Value(ctx, new_val, true);
+    if (isArray()) {
+      auto new_val = JS_GetPropertyUint32(ctx, raw(), index);
+      return Value(ctx, new_val, true);
     } else {
-        return Value(ctx, JS_UNDEFINED, true);
+      return Value(ctx, JS_UNDEFINED, true);
     }
   }
 
-  template <typename T> bool set(size_t index, T value){
+  template <typename T> bool set(size_t index, T value) {
     return set(index, qjs::Value(context(), value));
   }
 
-  template <typename T> bool set(std::string index, T value){
+  template <typename T> bool set(std::string index, T value) {
     return set(index, qjs::Value(context(), value));
   }
 
-  virtual qjs::Value get(const std::string & name) const override {
+  virtual qjs::Value get(const std::string &name) const override {
     auto ctx = context();
-    if (isObject()){
-        auto new_val = JS_GetPropertyStr(ctx, raw(), name.c_str());
-        return Value(ctx, new_val, true);
+    if (isObject()) {
+      auto new_val = JS_GetPropertyStr(ctx, raw(), name.c_str());
+      return Value(ctx, new_val, true);
     } else {
-        return Value(ctx, JS_UNDEFINED, true);
+      return Value(ctx, JS_UNDEFINED, true);
     }
   }
 
   typedef JSClassID ClassID;
 
-  void * as(ClassID classid) {
-    if (classid == JS_INVALID_CLASS_ID){
+  void *as(ClassID classid) {
+    if (classid == JS_INVALID_CLASS_ID) {
       return nullptr;
     }
     return JS_GetOpaque(value_, classid);
   }
 
-  bool is(ClassID classid) {
-    return as(classid) != nullptr;
-  }
+  bool is(ClassID classid) { return as(classid) != nullptr; }
 
-  ClassID getClassID(){
-    return JS_GetClassID(value_);
-  }
+  ClassID getClassID() { return JS_GetClassID(value_); }
 
   template <typename T> bool is() const;
 
@@ -284,10 +296,10 @@ public:
   friend void throwIfException(JSContext *ctx, qjs::Value &value);
   friend class PointerArray;
   friend JSValue js_function_trampoline(JSContext *ctx, JSValueConst this_val,
-                             int argc, JSValueConst *argv,
-                             int magic, JSValueConst *data);
-protected:
+                                        int argc, JSValueConst *argv, int magic,
+                                        JSValueConst *data);
 
+protected:
   JSValue rawdup() const { return JS_DupValue(ctx_, value_); }
   JSValue raw() const { return value_; }
 
@@ -302,128 +314,208 @@ protected:
   JSValue value_ = JS_UNDEFINED;
 };
 
-  template <typename T> bool Array::set(size_t index, T value){
-    return set(index, qjs::Value(context(), value));
-  }
-
-  template <typename T> bool Map::set(const std::string &index, T value){
-    return set(index, qjs::Value(context(), value));
-  }
-
-  qjs::Value Callback::call(const Value& val, Array*arr) { // NOLINT(misc-definitions-in-headers)
-    return fn(val, arr);
+class VectorArray : public Array, public std::vector<Value> {
+public:
+  virtual ~VectorArray() override { this->clear(); }
+  virtual Value get(size_t index) const override {
+    return std::vector<Value>::at(index);
   };
+  virtual bool set(size_t index, Value value) override {
+    auto count = size();
+    if (count <= index) {
+      this->std::vector<Value>::reserve(index * 2);
+      auto ctx = context();
+      while (count < index) {
+        this->std::vector<Value>::push_back(
+            qjs::Value(ctx, JS_UNDEFINED, true));
+        count++;
+      }
+      this->std::vector<Value>::push_back(value);
+    } else {
+      this->std::vector<Value>::at(index) = value;
+    }
+    return true;
+  };
+  virtual size_t size() const override { return std::vector<Value>::size(); };
+  template <typename T> bool set(size_t index, T value) {
+    return set(index, qjs::Value(context(), value));
+  };
+  VectorArray(JSContext *ctx) { this->ctx = ctx; }
 
-class PointerArray: public Array {
-  public:
-  virtual ~PointerArray(){};
-  PointerArray(JSContext * ctx, int argc, JSValueConst *argv){
-    
+private:
+  JSContext *ctx;
+
+protected:
+  virtual JSContext *context() const override { return ctx; }
+};
+
+Array *
+newEmptyArray(JSContext *context) { // NOLINT(misc-definitions-in-headers)
+  return new VectorArray(context);
+}
+
+template <typename... T> qjs::Value Function::invoke(const Value &th, T... Ts) {
+
+  auto context = this->context();
+  VectorArray v(context);
+  v.reserve(sizeof...(T));
+
+  (v.emplace_back(context, std::forward<T>(Ts)), ...);
+  return this->call(th, &v);
+};
+
+template <typename T> bool Array::set(size_t index, T value) {
+  return set(index, qjs::Value(context(), value));
+}
+
+template <typename T> bool Map::set(const std::string &index, T value) {
+  return set(index, qjs::Value(context(), value));
+}
+
+qjs::Value
+Callback::call(const Value &val, // NOLINT(misc-definitions-in-headers)
+               Array *arr) {
+  return fn(val, arr);
+};
+
+class PointerArray : public Array {
+public:
+  virtual ~PointerArray() {};
+  PointerArray(JSContext *ctx, int argc, JSValueConst *argv) {
+    this->ctx = ctx;
+    this->length = argc;
+    this->array = argv;
   }
-  virtual Value get(size_t index) const override { 
+  virtual Value get(size_t index) const override {
     auto ctx = context();
-    if (index >= length){
+    if (index >= length) {
       return Value(ctx, JS_UNDEFINED, true);
     } else {
       return Value(ctx, array[index], false);
     }
   };
   virtual bool set(size_t index, Value value) override {
-    if (index >= length){
+    if (index >= length) {
       return false;
     } else {
       array[index] = value.rawdup();
       return true;
     }
   };
-  virtual JSContext * context() const override { return ctx; };
+  virtual JSContext *context() const override { return ctx; };
   virtual size_t size() const override { return length; };
 
-  template <typename T> bool set(size_t index, T value){
+  template <typename T> bool set(size_t index, T value) {
     return set(index, qjs::Value(context(), value));
   }
-  private:
+
+private:
   size_t length = 0;
   JSValueConst *array;
-  JSContext * ctx;
+  JSContext *ctx;
 };
 
-
-static void object_finalizer(JSRuntime * rt, JSValue val);
+static void object_finalizer(JSRuntime *rt, JSValue val);
 
 struct ClassHeap {
   JSClassDef def;
-  std::function<void(void*)> finalize;
-  void operator () (void* p) {
-    if (finalize != nullptr){
+  std::function<void(void *)> finalize;
+  void operator()(void *p) {
+    if (finalize != nullptr) {
       finalize(p);
     }
   }
-  ClassHeap(const std::string & name, const std::function<void(void*)> & func){
+  ClassHeap(const std::string &name, const std::function<void(void *)> &func) {
     def.class_name = strdup(name.c_str());
     def.finalizer = object_finalizer;
     finalize = func;
   }
 };
 
-struct QuickJS_CppClasses {
+class QuickJS_CppClasses {
+public:
+  friend QuickJS_CppClasses *getClasses(JSRuntime *rt);
   JSClassID function_class;
   std::unordered_map<JSClassID, ClassHeap> finalizer_map;
+  ~QuickJS_CppClasses() { free(); }
 
-  ~QuickJS_CppClasses(){
-    for (auto ptr: finalizer_map){
-      free((void*)ptr.second.def.class_name) ;
+private:
+  void free() {
+    for (auto iter : this->finalizer_map) {
+      auto name = iter.second.def.class_name;
+      iter.second.def.class_name = nullptr;
+      if (name != nullptr)
+        ::free((void *)name);
     }
-    finalizer_map.clear();
   }
 };
 
 static void function_finalizer(JSRuntime *rt, JSValue val);
 
-static JSClassDef function_def = {
-   "qr243vbi_function",
-   function_finalizer
-};
+static JSClassDef function_def = {"qr243vbi_function", function_finalizer};
 
-static QuickJS_CppClasses * getClasses (JSRuntime * rt) {
-  auto cls = (QuickJS_CppClasses *) JS_GetRuntimeOpaque(rt);
-  if (cls == nullptr){
-    cls = new QuickJS_CppClasses();
-    JS_NewClassID(rt, &cls->function_class);
-    JS_NewClass(rt, cls->function_class, &function_def);
+static void finalize_pointer(void *ptr,
+                             std::function<void(void *)> fn = nullptr);
+
+QuickJS_CppClasses *
+getClasses(JSRuntime *rt) { // NOLINT(misc-definitions-in-headers)
+  auto cls = (QuickJS_CppClasses *)JS_GetRuntimeOpaque(rt);
+  if (cls == nullptr) {
+    cls = (QuickJS_CppClasses *)malloc(sizeof(QuickJS_CppClasses));
+    finalize_pointer((void *)cls, [](void *p) -> void {
+      auto d = (QuickJS_CppClasses *)p;
+      d->free();
+    });
+    JSClassID clsID = 0;
+    JS_NewClassID(rt, &clsID);
+    JS_NewClass(rt, clsID, &function_def);
     JS_SetRuntimeOpaque(rt, cls);
+    cls->function_class = clsID;
   }
   return cls;
 }
 
-void object_finalizer(JSRuntime * rt, JSValue val){ 
+void object_finalizer(JSRuntime *rt, JSValue val) {
   JSClassID cls = JS_GetClassID(val);
-  if (cls != JS_INVALID_CLASS_ID){
+  if (cls != JS_INVALID_CLASS_ID) {
     auto opaque = getClasses(rt);
     auto iter = opaque->finalizer_map.find(cls);
-    if (iter != opaque->finalizer_map.end()){
+    if (iter != opaque->finalizer_map.end()) {
       iter->second(JS_GetOpaque(val, cls));
     }
   }
 }
 
-static QuickJS_CppClasses * getClasses (JSContext * rt) {
+QuickJS_CppClasses *
+getClasses(JSContext *rt) { // NOLINT(misc-definitions-in-headers)
   return getClasses(JS_GetRuntime(rt));
 }
 
-JSValue js_function_trampoline(JSContext *ctx, JSValueConst this_val, // NOLINT(misc-definitions-in-headers)
-                             int argc, JSValueConst *argv,
-                             int magic, JSValueConst *data) { 
-    JSClassID class_id = getClasses(ctx)->function_class;
-    qjs::Function *cb = (qjs::Function*)JS_GetOpaque(data[0], class_id);
-    std::shared_ptr<PointerArray> ptr = std::make_shared<PointerArray>(ctx, argc, argv);
-    return cb->call(Value(ctx, this_val, false), ptr.get()).rawdup();
+JSValue js_function_trampoline(
+    JSContext *ctx,
+    JSValueConst this_val, // NOLINT(misc-definitions-in-headers)
+    int argc, JSValueConst *argv, int magic, JSValueConst *data) {
+  JSClassID class_id = getClasses(ctx)->function_class;
+  qjs::Function *cb = (qjs::Function *)JS_GetOpaque(data[0], class_id);
+  std::shared_ptr<PointerArray> ptr =
+      std::make_shared<PointerArray>(ctx, argc, argv);
+
+  JSValue retvaljs;
+  {
+    auto thisval = Value(ctx, this_val, false);
+    {
+      auto retval = cb->call(thisval, ptr.get());
+      retvaljs = retval.rawdup();
+    }
+  }
+
+  return retvaljs;
 }
 
 void function_finalizer(JSRuntime *rt, JSValue val) {
-  QuickJS_CppClasses * cls = (QuickJS_CppClasses *)JS_GetRuntimeOpaque(rt);
-  if (cls != nullptr){
-    Function * opaque = (Function *)JS_GetOpaque(val, cls->function_class);
+  QuickJS_CppClasses *cls = (QuickJS_CppClasses *)JS_GetRuntimeOpaque(rt);
+  if (cls != nullptr) {
+    Function *opaque = (Function *)JS_GetOpaque(val, cls->function_class);
     if (opaque != nullptr) {
       delete opaque;
     }
@@ -439,15 +531,7 @@ public:
     }
   }
 
-  ~Runtime() {
-    if (rt_) {
-      auto data = (QuickJS_CppClasses*) JS_GetRuntimeOpaque(rt_);
-      if (data != nullptr) {
-        delete data;
-      }
-      JS_FreeRuntime(rt_);
-    }
-  }
+  ~Runtime() { this->free(); }
 
   Runtime(const Runtime &) = delete;
   Runtime &operator=(const Runtime &) = delete;
@@ -456,8 +540,9 @@ public:
 
   Runtime &operator=(Runtime &&other) noexcept {
     if (this != &other) {
-      if (rt_)
-        JS_FreeRuntime(rt_);
+      if (rt_) {
+        free();
+      }
       rt_ = other.rt_;
       other.rt_ = nullptr;
     }
@@ -468,7 +553,32 @@ public:
 
 private:
   JSRuntime *rt_{};
+  void free() {
+    if (rt_) {
+      auto data = JS_GetRuntimeOpaque(rt_);
+      finalize_pointer(data);
+      JS_FreeRuntime(rt_);
+    }
+  }
 };
+
+void finalize_pointer(void *ptr, std::function<void(void *)> fn) {
+  static std::map<void *, std::function<void(void *)>> finalizers;
+  if (ptr != nullptr) {
+    if (fn == nullptr) {
+      auto iter = finalizers.find(ptr);
+      if (iter != finalizers.end()) {
+        if (iter->second != nullptr) {
+          iter->second(ptr);
+        }
+        finalizers.erase(iter);
+      }
+      free(ptr);
+    } else {
+      finalizers[ptr] = fn;
+    }
+  }
+}
 
 class Context {
 public:
@@ -480,123 +590,108 @@ public:
     if (!ctx_)
       throw std::runtime_error("JS_NewContext failed");
   }
-  explicit Context(Runtime &runtime): Context(runtime.get(), false) {}
+  explicit Context(JSContext *ctx, bool takeOwnership) {
+    this->owned = takeOwnership;
+    this->ctx_ = ctx;
+  }
+  explicit Context(Runtime &runtime) : Context(runtime.get(), false) {}
   explicit Context(JSRuntime *rt_, bool takeOwnership) {
     ctx_ = JS_NewContext(rt_);
     if (!ctx_)
       throw std::runtime_error("JS_NewContext failed");
-    if (takeOwnership){
+    if (takeOwnership) {
       this->rt_ = rt_;
     }
   }
 
-  ~Context() {
-    if (ctx_ != nullptr){
-      void *data = JS_GetContextOpaque(ctx_);
-      if (data) {
-        free(data);
-      }
-      JS_FreeContext(ctx_);
-    }
-    if (rt_ != nullptr){
-      auto data = (QuickJS_CppClasses*) JS_GetRuntimeOpaque(rt_);
-      if (data) {
-        delete data;
-      }
-      JS_FreeRuntime(rt_);
-    }
-  }
+  ~Context() { free(); }
 
   Context(const Context &) = delete;
   Context &operator=(const Context &) = delete;
 
   JSContext *get() const { return ctx_; }
 
-  template<typename T> qjs::Value newValue(T t){
-    return qjs::Value(ctx_, t);
-  }
+  template <typename T> qjs::Value newValue(T t) { return qjs::Value(ctx_, t); }
 
-  JSClassID newClassID(const std::string & name, const std::function<void(void*)> &finalizer){
+  JSClassID newClassID(const std::string &name,
+                       const std::function<void(void *)> &finalizer) {
     auto classmap = getClasses(ctx_);
-    JSClassID id ;
+    JSClassID id = 0;
     auto runtime = JS_GetRuntime(ctx_);
     JS_NewClassID(runtime, &id);
+    auto proto = JS_NewObject(ctx_);
+    JS_SetClassProto(ctx_, id, proto);
     auto pair = classmap->finalizer_map.emplace(
-      std::piecewise_construct,
-    std::forward_as_tuple(id),
-    std::forward_as_tuple(name, finalizer)
-    );
+        std::piecewise_construct, std::forward_as_tuple(id),
+        std::forward_as_tuple(name, finalizer));
     JS_NewClass(runtime, id, &pair.first->second.def);
     return id;
   }
 
-  qjs::Value newFunction(qjs::Function * fn)
-  {
-    if (qjs::Value* d = dynamic_cast<qjs::Value*>(fn)) {
+  qjs::Value newFunction(qjs::Function *fn) {
+    if (qjs::Value *d = dynamic_cast<qjs::Value *>(fn)) {
       return *d;
     }
     JSContext *ctx = this->ctx_;
-    JSValue data_obj =
-        JS_NewObjectClass(ctx, getClasses(ctx)->function_class);
+    auto class_id = getClasses(ctx)->function_class;
+    JSValue proto = JS_GetClassProto(ctx, class_id);
+    if (JS_IsUndefined(proto)) {
+      proto = JS_NewObject(ctx);
+      JS_SetClassProto(ctx, class_id, proto);
+    }
+
+    JSValue data_obj = JS_NewObjectClass(ctx, class_id);
 
     JS_SetOpaque(data_obj, fn);
 
-    JSValue data[1] = {
-        data_obj
-    };
+    JSValue data[1] = {data_obj};
 
-    JSValue func = JS_NewCFunctionData(
-        ctx,
-        js_function_trampoline,
-        0,      // length
-        0,      // magic
-        1,      // data count
-        data
-    );
+    JSValue func = JS_NewCFunctionData(ctx, js_function_trampoline,
+                                       0, // length
+                                       0, // magic
+                                       1, // data count
+                                       data);
 
     JS_FreeValue(ctx, data_obj);
 
     return Value(ctx, func, true);
   }
 
-  qjs::Value newFunction(std::function<Value(const Value&, Array*)> fn){
-    auto call = new Callback();
+  qjs::Value newFunction(std::function<Value(const Value &, Array *)> fn) {
+    auto call = new Callback(this->ctx_);
     call->fn = fn;
-    return newFunction(call);    
+    return newFunction(call);
   }
 
   qjs::Value getGlobal() {
     return qjs::Value(ctx_, JS_GetGlobalObject(ctx_), true);
   }
 
-  
-  qjs::Value getGlobal(const std::string & name){
+  qjs::Value getGlobal(const std::string &name) {
     auto global = getGlobal();
     return global.get(name);
   }
 
-
-  bool setGlobal(const std::string & name, const qjs::Value & val){
+  bool setGlobal(const std::string &name, const qjs::Value &val) {
     auto global = getGlobal();
     return global.set(name, val);
   };
 
-  bool dropGlobal(const std::string &name){
+  bool dropGlobal(const std::string &name) {
     auto global = getGlobal();
     return global.drop(name);
   }
 
-
   template <
-    typename T,
-    std::enable_if_t<!std::is_same_v<std::decay_t<T>, Value>, int> = 0,
-    std::enable_if_t<!std::is_same_v<std::decay_t<T>, JSValue>, int> = 0
-  >
-  bool setGlobal(const std::string & name, T val){
+      typename T,
+      std::enable_if_t<!std::is_same_v<std::decay_t<T>, Value>, int> = 0,
+      std::enable_if_t<!std::is_same_v<std::decay_t<T>, JSValue>, int> = 0>
+  bool setGlobal(const std::string &name, T val) {
     return setGlobal(name, qjs::Value(ctx_, val));
   };
 
-  qjs::Value newObject(JSClassID id = JS_INVALID_CLASS_ID, void * opaque = nullptr) {
+  qjs::Value newObject(JSClassID id = JS_INVALID_CLASS_ID,
+                       void *opaque = nullptr) {
     qjs::Value val;
     val.assignObject(ctx_, id, opaque);
     return val;
@@ -610,13 +705,30 @@ public:
 
   qjs::Value eval(const std::string &code,
                   const std::string &filename = "<eval>") {
-    return Value(ctx_, JS_Eval(ctx_, code.c_str(), code.size(),
-                  filename.c_str(), JS_EVAL_TYPE_GLOBAL), true);
+    return Value(ctx_,
+                 JS_Eval(ctx_, code.c_str(), code.size(), filename.c_str(),
+                         JS_EVAL_TYPE_GLOBAL),
+                 true);
   }
 
 private:
   JSContext *ctx_ = nullptr;
   JSRuntime *rt_ = nullptr;
+  bool owned = true;
+  void free() {
+    if (owned) {
+      if (ctx_ != nullptr) {
+        void *data = JS_GetContextOpaque(ctx_);
+        finalize_pointer(data);
+        JS_FreeContext(ctx_);
+      }
+      if (rt_ != nullptr) {
+        auto data = (QuickJS_CppClasses *)JS_GetRuntimeOpaque(rt_);
+        finalize_pointer(data);
+        JS_FreeRuntime(rt_);
+      }
+    }
+  }
 };
 
 template <> inline bool Value::is<std::vector<Value>>() const {
@@ -631,13 +743,9 @@ template <> inline bool Value::is<std::nullptr_t>() const { return isNull(); }
 
 template <> inline bool Value::is<bool>() const { return isBool(); }
 
-template <> inline bool Value::is<int32_t>() const {
-  return isNumber();
-}
+template <> inline bool Value::is<int32_t>() const { return isNumber(); }
 
-template <> inline bool Value::is<int64_t>() const {
-  return isNumber();
-}
+template <> inline bool Value::is<int64_t>() const { return isNumber(); }
 
 template <> inline bool Value::is<double>() const { return isNumber(); }
 
@@ -645,10 +753,11 @@ template <> inline bool Value::is<std::string>() const { return isString(); }
 
 class Exception : public std::runtime_error {
 public:
-  explicit Exception(JSContext *ctx, const std::string &error = "") : std::runtime_error(extract(ctx, error)) {}
+  explicit Exception(JSContext *ctx, const std::string &error = "")
+      : std::runtime_error(extract(ctx, error)) {}
 
 private:
-  static std::string extract(JSContext *ctx, const std::string& error) {
+  static std::string extract(JSContext *ctx, const std::string &error) {
     JSValue exc = JS_GetException(ctx);
 
     JSAtom atom = JS_NewAtom(ctx, "stack");
@@ -678,7 +787,7 @@ private:
 
     JS_FreeValue(ctx, stack);
     JS_FreeValue(ctx, exc);
-    if (error.empty()){
+    if (error.empty()) {
       return result;
     } else {
       return error + " " + result;
@@ -752,11 +861,11 @@ template <> inline double Value::as<double>() const {
 }
 
 inline void throwIfException(JSContext *ctx, JSValueConst value) {
-  if (!JS_IsException(value)){
+  if (!JS_IsException(value)) {
     return;
   }
 
-    throw qjs::Exception(ctx);
+  throw qjs::Exception(ctx);
 }
 
 inline void throwIfException(JSContext *ctx, qjs::Value &value) {
