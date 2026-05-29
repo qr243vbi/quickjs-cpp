@@ -159,6 +159,19 @@ constexpr bool is_array_or_derived = std::is_base_of<Array, T>::value;
 template <typename T>
 using is_not_array = std::integral_constant<bool, !is_array_or_derived<T>>;
 
+template <typename... Ts>
+struct all_not_array;
+
+template <>
+struct all_not_array<> : std::true_type {};
+
+template <typename T, typename... Rest>
+struct all_not_array<T, Rest...>
+    : std::conditional_t<
+          is_not_array<std::decay_t<T>>::value,
+          all_not_array<Rest...>,
+          std::false_type> {};
+
 /**
  * @brief Abstract representation of a JavaScript callable function.
  *
@@ -179,6 +192,7 @@ public:
    * @param xs Argument array
    * @return Result of function execution
    */
+
   template <typename Array,
     std::enable_if_t<(is_array_or_derived<Array>), int> = 0>
   qjs::Value invoke(qjs::Value *th, Array* xs);
@@ -190,7 +204,6 @@ public:
    */
   qjs::Value invoke();
 
-#ifndef _MSC_VER
   /**
    * @brief Invokes the function with variadic arguments and explicit this-value.
    *
@@ -201,10 +214,9 @@ public:
    * @param xs Variadic arguments to pass to the function
    * @return Result of function execution
    */
-  template <typename... T,
-            std::enable_if_t<(is_not_array<T>::value && ...), int> = 0>
-  qjs::Value invoke(qjs::Value *th, T... xs);
-#endif
+template <typename... T,
+          std::enable_if_t<all_not_array<T...>::value, int> = 0>
+  qjs::Value invoke(qjs::Value *th, T&&... xs);
 
   /// @brief Virtual destructor for safe polymorphic destruction
   virtual ~Function() = default;
@@ -798,9 +810,7 @@ qjs::Value Function::invoke(){ // NOLINT(misc-definitions-in-headers)
   return this->invoke(nullptr, (Array*)nullptr);
 }
 
-#ifndef _MSC_VER
 template <typename Array, std::enable_if_t<(is_array_or_derived<Array> ), int> >
-#endif
 qjs::Value Function::invoke(Value *th, Array* Ts) {
     bool delete_array = Ts == nullptr;
     bool delete_value = th == nullptr;
@@ -826,18 +836,20 @@ qjs::Value Function::invoke(Value *th, Array* Ts) {
     return ret;
 };
 
-#ifndef _MSC_VER
 template <typename... T,
-          std::enable_if_t<(is_not_array<T>::value && ...), int> >
-qjs::Value Function::invoke(Value *th, T... Ts) {
-  auto context = this->context();
-  VectorArray v(context);
-  v.reserve(sizeof...(T));
+          std::enable_if_t<all_not_array<T...>::value, int> >
+qjs::Value Function::invoke(qjs::Value *th, T&&... xs)
+{
+    auto ctx = this->context();
 
-  (v.emplace_back(context, std::forward<T>(Ts)), ...);
-  return this->invoke(th, &v);
-};
-#endif
+    VectorArray arr(ctx);
+    arr.reserve(sizeof...(T));
+
+    // Expand arguments safely
+    (arr.emplace_back(ctx, std::forward<T>(xs)), ...);
+
+    return this->invoke(th, &arr);
+}
 
 static void function_finalizer(JSRuntime *rt, JSValue val);
 
