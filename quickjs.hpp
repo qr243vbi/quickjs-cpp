@@ -534,7 +534,9 @@ getClasses(JSRuntime *rt) { // NOLINT(misc-definitions-in-headers)
     cls = (QuickJS_CppClasses *)malloc(sizeof(QuickJS_CppClasses));
     finalize_pointer((void *)cls, [](void *p) -> void {
       auto d = (QuickJS_CppClasses *)p;
-      d->free();
+      if (d != nullptr) {
+        d->free();
+      }
     });
     JSClassID clsID = 0;
     JS_NewClassID(rt, &clsID);
