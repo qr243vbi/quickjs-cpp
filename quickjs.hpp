@@ -5,6 +5,7 @@
 #include <memory>
 #include <quickjs.h>
 #include <stdexcept>
+#include <unordered_map>
 #include <vector>
 namespace qjs {
 
@@ -41,6 +42,9 @@ public:
 template <typename T>
 constexpr bool is_array_or_derived = std::is_base_of<Array, T>::value;
 
+template <typename T>
+using is_not_array = std::integral_constant<bool, !is_array_or_derived<T>>;
+
 class Function : public ContextGetter {
 public:
 
@@ -50,8 +54,8 @@ qjs::Value invoke(qjs::Value *th, T* xs);
 
 qjs::Value invoke();
 
-template <typename... T, 
-  std::enable_if_t<(!is_array_or_derived<T> &&...), int> = 0 > 
+template <typename... T,
+          std::enable_if_t<(is_not_array<T>::value && ...), int> = 0>
 qjs::Value invoke(qjs::Value *th, T... xs);
 
 
@@ -512,7 +516,8 @@ qjs::Value Function::invoke(Value *th, T* Ts) {
     return ret;
 };
 
-template <typename... T,   std::enable_if_t<(!is_array_or_derived<T> &&...), int> >
+template <typename... T,
+          std::enable_if_t<(is_not_array<T>::value && ...), int> >
 qjs::Value Function::invoke(Value *th, T... Ts) {
   auto context = this->context();
   VectorArray v(context);
