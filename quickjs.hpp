@@ -1022,13 +1022,21 @@ public:
 
   template <typename T> qjs::Value newValue(T t) { return qjs::Value(ctx_, t); }
 
+  Value getClassProto(JSClassID id){
+    JSValue proto = JS_GetClassProto(ctx_, id);
+    return Value(ctx_, proto, true);
+  }
+
   JSClassID newClassID(const std::string &name,
-                       const std::function<void(void *)> &finalizer) {
+                       const std::function<void(void *)> &finalizer = nullptr, Value * proto_ptr = nullptr) {
     auto classmap = getClasses(ctx_);
     JSClassID id = 0;
     auto runtime = JS_GetRuntime(ctx_);
     JS_NewClassID(runtime, &id);
     auto proto = JS_NewObject(ctx_);
+    if (proto_ptr != nullptr){
+      *proto_ptr = Value(ctx_, proto, false);
+    }
     JS_SetClassProto(ctx_, id, proto);
     auto pair = classmap->finalizer_map.emplace(
         std::piecewise_construct, std::forward_as_tuple(id),
