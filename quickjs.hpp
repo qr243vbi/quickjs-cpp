@@ -48,16 +48,17 @@ using is_not_array = std::integral_constant<bool, !is_array_or_derived<T>>;
 class Function : public ContextGetter {
 public:
 
-template <typename T, 
-  std::enable_if_t<(is_array_or_derived<T> ), int> = 0 > 
-qjs::Value invoke(qjs::Value *th, T* xs);
+template <typename Array, 
+  std::enable_if_t<(is_array_or_derived<Array> ), int> = 0 > 
+qjs::Value invoke(qjs::Value *th, Array* xs);
 
 qjs::Value invoke();
 
+#ifndef _MSC_VER
 template <typename... T,
           std::enable_if_t<(is_not_array<T>::value && ...), int> = 0>
 qjs::Value invoke(qjs::Value *th, T... xs);
-
+#endif
 
   virtual ~Function() = default;
 protected:
@@ -491,11 +492,13 @@ qjs::Value Function::invoke(){ // NOLINT(misc-definitions-in-headers)
   return this->invoke(nullptr, (Array*)nullptr);
 }
 
-template <typename T, std::enable_if_t<(is_array_or_derived<T> ), int> >
-qjs::Value Function::invoke(Value *th, T* Ts) {
+#ifndef _MSC_VER
+template <typename Array, std::enable_if_t<(is_array_or_derived<Array> ), int> >
+#endif
+qjs::Value Function::invoke(Value *th, Array* Ts) {
     bool delete_array = Ts == nullptr;
     bool delete_value = th == nullptr;
-    Array * arr;
+    qjs::Array * arr;
     
     if (delete_array) {
       arr = newEmptyArray(this->context());
@@ -517,6 +520,7 @@ qjs::Value Function::invoke(Value *th, T* Ts) {
     return ret;
 };
 
+#ifndef _MSC_VER
 template <typename... T,
           std::enable_if_t<(is_not_array<T>::value && ...), int> >
 qjs::Value Function::invoke(Value *th, T... Ts) {
@@ -527,6 +531,7 @@ qjs::Value Function::invoke(Value *th, T... Ts) {
   (v.emplace_back(context, std::forward<T>(Ts)), ...);
   return this->invoke(th, &v);
 };
+#endif
 
 static void function_finalizer(JSRuntime *rt, JSValue val);
 
