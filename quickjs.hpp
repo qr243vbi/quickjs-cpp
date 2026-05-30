@@ -623,9 +623,10 @@ public:
    * @param setter Setter function.
    * @param flags JS property flags.
    */
-  void setPropertyFunc(const std::string &name,
-                       const std::function<Value(Value *)> &getter1,
-                       const std::function<Value(Value *, Value *)> &setter1,
+  template <typename T, typename D, std::enable_if_t<is_template_function<T> && is_template_function<D>, int> = 0>
+  void setPropertyFunc(const std::string &name, 
+                       const T &getter1,
+                       const D &setter1,
                        int flags = JS_PROP_ENUMERABLE);
 
   /**
@@ -645,6 +646,63 @@ public:
       return false;
     }
   }
+
+    /**
+   * @brief Invokes the function with an explicit this-value and argument array.
+   *
+   * @tparam Array A type derived from qjs::Array
+   * @param th The JavaScript `this` value
+   * @param xs Argument array
+   * @return Result of function execution
+   */
+
+  template <typename Array,
+            std::enable_if_t<(is_array_or_derived<Array>), int> = 0>
+  qjs::Value invoke(qjs::Value *th, Array *xs){
+    return this->Function::invoke(th, xs);
+  };
+
+  /**
+   * @brief Invokes the function with no arguments and default this-value.
+   *
+   * @return Result of function execution
+   */
+  qjs::Value invoke(){
+    return this->Function::invoke();
+  };
+
+  /**
+   * @brief Invokes the function with variadic arguments and explicit
+   * this-value.
+   *
+   * Arguments are automatically packed into a temporary Array implementation.
+   *
+   * @tparam T Argument types (must not be Array types)
+   * @param th The JavaScript `this` value
+   * @param xs Variadic arguments to pass to the function
+   * @return Result of function execution
+   */
+  template <typename... T,
+            std::enable_if_t<all_not_array<T...>::value, int> = 0>
+  qjs::Value invoke(qjs::Value *th, T &&...xs){
+    return this->Function::invoke(th, xs...);
+  };
+
+  template <typename Array,
+    std::enable_if_t<(is_array_or_derived<Array>), int> = 0>
+  qjs::Value invoke(const std::string & name, Array *xs){
+    return this->get(name).invoke(this, xs);
+  };
+
+  template <typename... T,
+    std::enable_if_t<all_not_array<T...>::value, int> = 0>
+  qjs::Value invoke(const std::string &th, T &&...xs){
+    auto value =  this->get(th);
+    return value.invoke(this, xs...);
+  };
+
+  template<typename Ret, typename Base, typename ... Args>
+  bool setMethod(const std::string & name, Ret (Base::* func) (Args...));
 
   /**
    * @brief Sets a property in an object.
@@ -742,9 +800,12 @@ public:
   bool isBigInt() const { return JS_VALUE_GET_TAG(raw()) == JS_TAG_BIG_INT; }
 
   virtual ~Value() { free(); }
-
+  
+  template<typename F>
+  friend auto wrap_method(F member_ptr, JSContext * ctx);
   friend void throwIfException(JSContext *ctx, qjs::Value &value);
   friend class PointerArray;
+  friend class Context;
   friend JSValue js_function_trampoline(JSContext *ctx, JSValueConst this_val,
                                         int argc, JSValueConst *argv, int magic,
                                         JSValueConst *data);
@@ -781,13 +842,18 @@ auto invoke_array(F &&lambda, Value *val, const Array *arr,
   }
 }
 
-template <typename T, typename F, typename JsArgsTuple, size_t... Is>
-auto invoke_method(F &&lambda, T *val, const Array *arr,
-                   std::index_sequence<Is...>) {
-  return std::invoke(
-      std::forward<F>(lambda), val,
-      arr->get(Is).template as<std::tuple_element_t<Is, JsArgsTuple>>()...);
-}
+template <typename T>
+struct drop_first_element;
+
+template <typename First, typename... Rest>
+struct drop_first_element<std::tuple<First, Rest...>> {
+    using type = std::tuple<Rest...>;
+};
+
+template <>
+struct drop_first_element<std::tuple<>> {
+    using type = std::tuple<>;
+};
 
 template <typename T, std::enable_if_t<is_not_jsvalue<T>, int> = 0>
 qjs::Value convertToValue(T t, JSContext *ctx) {
@@ -799,51 +865,65 @@ qjs::Value convertToValue(T t, JSContext *ctx) {
   return t;
 }
 
-template <typename T> struct drop_first_element;
+template<typename T, typename F, typename JsArgsTuple, size_t ... Is>
+auto invoke_method(F member_ptr, T* val, const Array* arr, std::index_sequence<Is...>) {
+  return std::invoke(
+    member_ptr,
+    val, 
+    arr->get(Is).template as<std::tuple_element_t<Is, JsArgsTuple>>()... 
+  );
+}
 
-template <typename First, typename... Rest>
-struct drop_first_element<std::tuple<First, Rest...>> {
-  using type = std::tuple<Rest...>;
-};
+template<typename F>
+auto wrap_method(F member_ptr, JSContext * ctx) {
+  static_assert(std::is_member_function_pointer_v<std::decay_t<F>>, 
+                "wrap_method can only be instantiated with a member function pointer.");
 
-template <typename F>
-auto wrap_method(F &&lambda, JSContext *ctx, JSClassID id) {
   using DecayedF = std::decay_t<F>;
-
-  // Full traits including the object pointer
-  using full_args_tuple = typename callable_traits<DecayedF>::args_tuple;
   using base_type = typename callable_traits<DecayedF>::base_type;
   using return_type = typename callable_traits<DecayedF>::return_type;
-
-  // Strip the 'this' pointer to get actual JavaScript arguments
-  using js_args_tuple = typename drop_first_element<full_args_tuple>::type;
+  using js_args_tuple = typename callable_traits<DecayedF>::args_tuple; 
   constexpr size_t js_args_count = std::tuple_size_v<js_args_tuple>;
 
-  // Capture lambda using correct forwarding syntax
-  return [id, ctx, lambda = std::forward<F>(lambda)](
-             Value *val, Array *arr) mutable -> Value {
+  return [ctx, member_ptr](Value * val, Array * arr) mutable -> Value {
+    if (val == nullptr || arr == nullptr || ctx == nullptr) {
+      throw_qjs_exception("Critical: Null execution context passed from QuickJS runtime.");
+    }
+    auto id = JS_GetClassID(val->raw());
+    if (id == JS_INVALID_CLASS_ID){
+      throw_qjs_exception("Critical: Invalid ClassID");
+    }
     if (arr->size() < js_args_count) {
-      throw_qjs_exception("Invalid argument count");
+      throw_qjs_exception("Argument mismatch: JavaScript provided fewer parameters than required.");
     }
-
-    auto base = (base_type *)val->as(id);
+    auto base = static_cast<base_type*>(val->as(id));
     if (base == nullptr) {
-      throw_qjs_exception("Invalid object pointer");
+      throw_qjs_exception("Type safety violation: Target object pointer is invalid or mismatched type.");
     }
-
-    // Handle 'void' returns using C++17 if constexpr
-    if constexpr (std::is_void_v<return_type>) {
-      invoke_method<base_type, F, js_args_tuple>(
-          lambda, base, arr, std::make_index_sequence<js_args_count>{});
-      return qjs::Value(ctx, JS_UNDEFINED, true);
-    } else {
-      return convertToValue(
-          invoke_method<base_type, F, js_args_tuple>(
-              lambda, base, arr, std::make_index_sequence<js_args_count>{}),
-          ctx);
+    try {
+      if constexpr (std::is_void_v<return_type>) {
+        invoke_method<base_type, DecayedF, js_args_tuple>(
+          member_ptr, base, arr, std::make_index_sequence<js_args_count>{}
+        );
+        return qjs::Value(ctx, JS_UNDEFINED, true); 
+      } else {
+        return convertToValue( 
+          invoke_method<base_type, DecayedF, js_args_tuple>(
+            member_ptr, base, arr, std::make_index_sequence<js_args_count>{}
+          ), 
+          ctx
+        );
+      }
+    } 
+    catch (const std::exception& e) {
+      throw_qjs_exception(e.what());
+    }
+    catch (...) {
+      throw_qjs_exception("Unknown native exception occurred during method execution.");
     }
   };
 }
+
 
 template <typename F> auto wrap_lambda(F &&lambda, JSContext *ctx) {
   using DecayedF = std::decay_t<F>;
@@ -851,9 +931,13 @@ template <typename F> auto wrap_lambda(F &&lambda, JSContext *ctx) {
 
   using return_type = typename callable_traits<DecayedF>::return_type;
   constexpr size_t total_args = callable_traits<DecayedF>::args_count;
-  constexpr bool has_val_param =
-      total_args > 0 &&
-      std::is_same_v<std::tuple_element_t<0, args_tuple>, Value *>;
+  constexpr bool has_val_param = []() {
+    if constexpr (total_args > 0) {
+        return std::is_same_v<std::tuple_element_t<0, args_tuple>, Value *>;
+    } else {
+        return false;
+    }
+  }();
   constexpr size_t js_args_count =
       has_val_param ? (total_args - 1) : total_args;
 
@@ -974,42 +1058,66 @@ private:
   JSContext *ctx;
 };
 
-static void object_finalizer(JSRuntime *rt, JSValue val);
+void ClassWrapperFinalize(JSRuntime *rt, JSValueConst val);
 
-struct ClassHeap {
-  JSClassDef def;
-  std::function<void(void *)> finalize;
-  void operator()(void *p) {
-    if (finalize != nullptr) {
-      finalize(p);
-    }
-  }
-  ClassHeap(const std::string &name, const std::function<void(void *)> &func) {
+struct ClassWrapper {
+  public:
+  JSClassID id;
+  std::function<void(void*)> finalize;
+  ClassWrapper(const std::string &name){
     def.class_name = strdup(name.c_str());
-    def.finalizer = object_finalizer;
-    finalize = func;
+    def.finalizer = &ClassWrapperFinalize;
+    id = JS_INVALID_CLASS_ID;
   }
+  ~ClassWrapper(){
+    free((void*)def.class_name);
+  }
+  static std::shared_ptr<ClassWrapper> newWrapper(const std::string &name){
+    return std::make_shared<ClassWrapper>(name);
+  }
+  JSClassDef def;
 };
 
 class QuickJS_CppClasses {
 public:
   friend QuickJS_CppClasses *getClasses(JSRuntime *rt);
   JSClassID function_class;
-  std::unordered_map<JSClassID, ClassHeap> finalizer_map;
+  std::unordered_map<JSClassID, std::shared_ptr<ClassWrapper>> finalizer_map;
   ~QuickJS_CppClasses() { free(); }
 
 private:
   void free() {
-    for (auto &iter : finalizer_map) { // use reference
-      auto name = iter.second.def.class_name;
-      iter.second.def.class_name = nullptr;
-      if (name != nullptr) {
-        ::free((void *)name); // ensure memory was dynamically allocated
-      }
-    }
     finalizer_map.clear();
   }
 };
+
+QuickJS_CppClasses *getClasses(JSRuntime *rt);
+
+void ClassWrapperFinalize(JSRuntime *rt, JSValueConst val){ // NOLINT(misc-definitions-in-headers)
+  auto classes = getClasses(rt);
+  auto classid = JS_GetClassID(val);
+  if (classid == JS_INVALID_CLASS_ID){
+    return;
+  }
+  auto opaque = JS_GetOpaque(val, classid);
+  if (opaque == nullptr){
+    return;
+  }
+  std::shared_ptr<ClassWrapper> wrapper = nullptr;
+  {
+    auto iter = classes->finalizer_map.find(classid);
+    if (iter != classes->finalizer_map.end()){
+      wrapper = iter->second;
+    }
+  }
+  if (wrapper != nullptr) {
+    auto fn = wrapper->finalize;
+    if (fn != nullptr){
+      fn(opaque);
+    }
+  }
+};
+
 
 qjs::Value Function::invoke() { // NOLINT(misc-definitions-in-headers)
   return this->invoke(nullptr, (Array *)nullptr);
@@ -1079,16 +1187,6 @@ getClasses(JSRuntime *rt) { // NOLINT(misc-definitions-in-headers)
   return cls;
 }
 
-void object_finalizer(JSRuntime *rt, JSValue val) {
-  JSClassID cls = JS_GetClassID(val);
-  if (cls != JS_INVALID_CLASS_ID) {
-    auto opaque = getClasses(rt);
-    auto iter = opaque->finalizer_map.find(cls);
-    if (iter != opaque->finalizer_map.end()) {
-      iter->second(JS_GetOpaque(val, cls));
-    }
-  }
-}
 
 QuickJS_CppClasses *
 getClasses(JSContext *rt) { // NOLINT(misc-definitions-in-headers)
@@ -1225,30 +1323,40 @@ public:
 
   JSContext *get() const { return ctx_; }
 
+  std::shared_ptr<ClassWrapper> newClass(const std::string & name, Value proto){
+    auto wrapper = ClassWrapper::newWrapper(name);
+    wrapper->id = 0;
+    auto runtime = JS_GetRuntime(ctx_);
+    JS_NewClassID(runtime, &wrapper->id);
+    JS_NewClass(runtime, wrapper->id, &wrapper->def);
+    JSValue pr;
+    if (!proto.isObject()){
+      proto = newObject();
+    }
+    pr = JS_NewObjectProto(ctx_, proto.raw());
+    JS_SetClassProto(ctx_, wrapper->id, pr);
+    auto classes = getClasses(runtime);
+    classes->finalizer_map[wrapper->id] = wrapper;
+    return wrapper;
+  }
+
+  std::shared_ptr<ClassWrapper> newClass(const std::string & name){
+    return newClass(name, newObject());
+  }
+
+  JSClassID newClassID(const std::string & name, Value proto){
+    return newClass(name, proto)->id;
+  }
+
+  JSClassID newClassID(const std::string & name){
+    return newClass(name)->id;
+  }
+
   template <typename T> qjs::Value newValue(T t) { return qjs::Value(ctx_, t); }
 
   Value getClassProto(JSClassID id) {
     JSValue proto = JS_GetClassProto(ctx_, id);
     return Value(ctx_, proto, true);
-  }
-
-  JSClassID newClassID(const std::string &name,
-                       const std::function<void(void *)> &finalizer = nullptr,
-                       Value *proto_ptr = nullptr) {
-    auto classmap = getClasses(ctx_);
-    JSClassID id = 0;
-    auto runtime = JS_GetRuntime(ctx_);
-    JS_NewClassID(runtime, &id);
-    auto proto = JS_NewObject(ctx_);
-    if (proto_ptr != nullptr) {
-      *proto_ptr = Value(ctx_, proto, false);
-    }
-    JS_SetClassProto(ctx_, id, proto);
-    auto pair = classmap->finalizer_map.emplace(
-        std::piecewise_construct, std::forward_as_tuple(id),
-        std::forward_as_tuple(name, finalizer));
-    JS_NewClass(runtime, id, &pair.first->second.def);
-    return id;
   }
 
   qjs::Value newFunction(qjs::Function *fn) {
@@ -1361,22 +1469,16 @@ Context Value::getContext() const { // NOLINT(misc-definitions-in-headers)
   return this->Array::getContext();
 }
 
-void Value::setPropertyFunc( // NOLINT(misc-definitions-in-headers)
-    const std::string &name, 
-    const std::function<Value(Value *)> &getter1,
-    const std::function<Value(Value *, Value *)> &setter1, int flags) {
+template <typename T, typename D, std::enable_if_t<is_template_function<T> && is_template_function<D>, int> >
+void Value::setPropertyFunc(const std::string &name, 
+                       const T &getter1,
+                       const D &setter1,
+                       int flags){
   auto ctx = getContext();
+  qjs::Value getter = ctx.newFunction(wrap_lambda(getter1, ctx_));
+  qjs::Value setter = ctx.newFunction(wrap_lambda(setter1, ctx_));
 
-  qjs::Value getter = ctx.newFunction(
-      [getter1](Value *th, Array *ar) -> qjs::Value { return getter1(th); });
-
-  qjs::Value setter =
-      ctx.newFunction([setter1](Value *th, Array *ar) -> qjs::Value {
-        qjs::Value val = ar->get(0);
-        return setter1(th, &val);
-      });
-
-  setPropertyFunc(name, getter, setter, flags);
+  setPropertyFunc(name, getter, setter, flags);                       
 };
 
 template <> inline bool Value::is<std::vector<Value>>() const {
@@ -1444,6 +1546,14 @@ private:
     }
   }
 };
+
+template <> inline Value Value::as<Value>() const {
+  return *this;
+}
+
+template <> inline Value* Value::as<Value*>() const {
+  return (Value*)this;
+}
 
 template <> inline std::string Value::as<std::string>() const {
   auto ctx_ = context();
@@ -1538,6 +1648,7 @@ Value newFunctionValue(JSContext *ctx,
   return context.newFunction(func);
 };
 
+
 template <typename T, std::enable_if_t<is_template_function<T>, int>>
 Value newFunctionValue(JSContext *ctx, T fn) {
   qjs::Context context(ctx, false);
@@ -1548,5 +1659,12 @@ void throw_qjs_exception( // NOLINT(misc-definitions-in-headers)
     const std::string &error) { 
   throw qjs::Exception(error);
 };
+
+
+  template<typename Ret, typename Base, typename ... Args>
+  bool qjs::Value::setMethod(const std::string & name, Ret (Base::* func) (Args...) ){
+    auto method = qjs::wrap_method(func, ctx_);
+    return set(name, method);
+  }
 
 } // namespace qjs
