@@ -5,7 +5,9 @@
 #include <memory>
 #include <quickjs.h>
 #include <stdexcept>
+#include <tuple>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 namespace qjs {
 
@@ -82,8 +84,7 @@ public:
    * @param value The value to assign
    * @return true if the assignment succeeded
    */
-  template <typename T>
-  bool set(size_t index, T value);
+  template <typename T> bool set(size_t index, T value);
 
   /// @brief Virtual destructor for safe polymorphic destruction
   virtual ~Array() = default;
@@ -124,7 +125,8 @@ public:
    * @brief Removes a property from the object.
    *
    * @param index The property key to remove
-   * @return true if the property was removed, false if it did not exist or could not be removed
+   * @return true if the property was removed, false if it did not exist or
+   * could not be removed
    */
   virtual bool drop(const std::string &index) = 0;
 
@@ -146,8 +148,7 @@ public:
    * @param value The value to assign
    * @return true if the assignment succeeded
    */
-  template <typename T>
-  bool set(const std::string &index, T value);
+  template <typename T> bool set(const std::string &index, T value);
 
   /// @brief Virtual destructor for safe polymorphic destruction
   virtual ~Map() = default;
@@ -157,20 +158,45 @@ template <typename T>
 constexpr bool is_array_or_derived = std::is_base_of<Array, T>::value;
 
 template <typename T>
+constexpr bool is_not_jsvalue =
+    !std::is_base_of_v<Value, std::remove_pointer_t<std::decay_t<T>>> &&
+    !std::is_base_of_v<JSValue, std::remove_pointer_t<std::decay_t<T>>>;
+
+template <typename T>
 using is_not_array = std::integral_constant<bool, !is_array_or_derived<T>>;
 
-template <typename... Ts>
-struct all_not_array;
+template <typename... Ts> struct all_not_array;
 
-template <>
-struct all_not_array<> : std::true_type {};
+template <> struct all_not_array<> : std::true_type {};
 
 template <typename T, typename... Rest>
 struct all_not_array<T, Rest...>
-    : std::conditional_t<
-          is_not_array<std::decay_t<T>>::value,
-          all_not_array<Rest...>,
-          std::false_type> {};
+    : std::conditional_t<is_not_array<std::decay_t<T>>::value,
+                         all_not_array<Rest...>, std::false_type> {};
+
+// 1. Primary template declaration
+template <typename T> struct callable_traits;
+
+// 2. Primary template definition (inherits from the operator() member pointer)
+template <typename T>
+struct callable_traits : callable_traits<decltype(&T::operator())> {};
+
+// 3. Specialization for non-const member function pointers
+template <typename Ret, typename Base, typename... Args>
+struct callable_traits<Ret (Base::*)(Args...)> {
+  using return_type = Ret;
+  using args_tuple = std::tuple<Args...>;
+  using base_type = Base;
+  static constexpr size_t args_count = sizeof...(Args);
+};
+
+// 4. Specialization for const member function pointers (lambdas match here)
+template <typename Ret, typename Base, typename... Args>
+struct callable_traits<Ret (Base::*)(Args...) const> {
+  using return_type = Ret;
+  using args_tuple = std::tuple<Args...>;
+  static constexpr size_t args_count = sizeof...(Args);
+};
 
 /**
  * @brief Abstract representation of a JavaScript callable function.
@@ -183,7 +209,6 @@ struct all_not_array<T, Rest...>
  */
 class Function : public ContextGetter {
 public:
-
   /**
    * @brief Invokes the function with an explicit this-value and argument array.
    *
@@ -194,8 +219,8 @@ public:
    */
 
   template <typename Array,
-    std::enable_if_t<(is_array_or_derived<Array>), int> = 0>
-  qjs::Value invoke(qjs::Value *th, Array* xs);
+            std::enable_if_t<(is_array_or_derived<Array>), int> = 0>
+  qjs::Value invoke(qjs::Value *th, Array *xs);
 
   /**
    * @brief Invokes the function with no arguments and default this-value.
@@ -205,7 +230,8 @@ public:
   qjs::Value invoke();
 
   /**
-   * @brief Invokes the function with variadic arguments and explicit this-value.
+   * @brief Invokes the function with variadic arguments and explicit
+   * this-value.
    *
    * Arguments are automatically packed into a temporary Array implementation.
    *
@@ -214,9 +240,9 @@ public:
    * @param xs Variadic arguments to pass to the function
    * @return Result of function execution
    */
-template <typename... T,
-          std::enable_if_t<all_not_array<T...>::value, int> = 0>
-  qjs::Value invoke(qjs::Value *th, T&&... xs);
+  template <typename... T,
+            std::enable_if_t<all_not_array<T...>::value, int> = 0>
+  qjs::Value invoke(qjs::Value *th, T &&...xs);
 
   /// @brief Virtual destructor for safe polymorphic destruction
   virtual ~Function() = default;
@@ -229,9 +255,48 @@ protected:
    * @param p Argument array (may be null)
    * @return Result of execution as a qjs::Value
    */
-  virtual qjs::Value call(qjs::Value *, qjs::Array * p = nullptr) = 0;
+  virtual qjs::Value call(qjs::Value *, qjs::Array *p = nullptr) = 0;
 };
 
+/**
+ * Create new qjs::Value from function pointer
+ */
+static Value newFunctionValue(JSContext *ctx, qjs::Function *func);
+
+/**
+ * Create new qjs::Value from function
+ */
+static Value newFunctionValue(JSContext *ctx,
+                              std::function<Value(Value *, Array *)> func);
+
+// 1. Helper to safely detect if a class has an operator() (lambdas/functors)
+template <typename T, typename = void> struct is_functor : std::false_type {};
+
+template <typename T>
+struct is_functor<T, std::void_t<decltype(&T::operator())>> : std::true_type {};
+
+// 2. Helper to verify if a raw pointer is specifically a function pointer
+template <typename T>
+constexpr bool is_raw_function_pointer =
+    std::is_pointer_v<T> && std::is_function_v<std::remove_pointer_t<T>>;
+
+// 3. Your updated template variable constraint
+template <typename T>
+constexpr bool is_template_function =
+    // A. Prevent infinite recursion overloads
+    !std::is_convertible_v<T, std::function<Value(Value *, Array *)>> &&
+
+    // B. Exclude internal qjs classes
+    !std::is_base_of_v<qjs::Function, std::remove_pointer_t<std::decay_t<T>>> &&
+
+    // C. ONLY allow lambdas/functors OR raw function pointers OR member
+    // function pointers
+    (is_functor<std::decay_t<T>>::value ||
+     is_raw_function_pointer<std::decay_t<T>> ||
+     std::is_member_function_pointer_v<std::decay_t<T>>);
+
+template <typename T, std::enable_if_t<is_template_function<T>, int> = 0>
+Value newFunctionValue(JSContext *ctx, T fn);
 
 /**
  * @brief Concrete Function implementation backed by a std::function callback.
@@ -241,7 +306,6 @@ protected:
  */
 class Callback : public Function {
 public:
-
   /**
    * @brief Constructs a Callback bound to a QuickJS context.
    *
@@ -326,6 +390,7 @@ protected:
 
     return Value(ctx, result, true);
   }
+
 public:
   /**
    * @brief Deletes a property from an object.
@@ -437,6 +502,37 @@ public:
   }
 
   /**
+   * @brief Assigns a function value.
+   *
+   * @param ctx QuickJS context.
+   * @param value function to wrap.
+   */
+  void assign(JSContext *ctx, Function *value) {
+    assign(ctx, newFunctionValue(ctx, value).rawdup(), true); // consumes v
+  }
+
+  /**
+   * @brief Assigns a function value.
+   *
+   * @param ctx QuickJS context.
+   * @param value function to wrap.
+   */
+  void assign(JSContext *ctx, std::function<Value(Value *, Array *)> value) {
+    assign(ctx, newFunctionValue(ctx, value).rawdup(), true); // consumes v
+  }
+
+  /**
+   * @brief Assigns a function value.
+   *
+   * @param ctx QuickJS context.
+   * @param value function to wrap.
+   */
+  template <typename T, std::enable_if_t<is_template_function<T>, int> = 0>
+  void assign(JSContext *ctx, T value) {
+    assign(ctx, newFunctionValue(ctx, value).rawdup(), true); // consumes v
+  }
+
+  /**
    * @brief Assigns an empty JS array.
    *
    * @param ctx QuickJS context.
@@ -470,9 +566,8 @@ public:
 
   template <
       typename T,
-      std::enable_if_t<!std::is_same_v<std::decay_t<T>, Value>, int> = 0,
-      std::enable_if_t<!is_array_or_derived<std::decay_t<T>>, int> = 0,
-      std::enable_if_t<!std::is_same_v<std::decay_t<T>, JSValue>, int> = 0>
+      std::enable_if_t<
+          !is_array_or_derived<std::decay_t<T>> && is_not_jsvalue<T>, int> = 0>
   Value(JSContext *ctx, T t) {
     assign(ctx, t);
   }
@@ -499,7 +594,6 @@ public:
 
   Value(Value &&val) noexcept { ASSIGN_MOVE(val); }
 
-
   /**
    * @brief Sets a getter and setter function on a property.
    *
@@ -508,8 +602,9 @@ public:
    * @param setter Setter Value.
    * @param flags JS property flags.
    */
-  void setPropertyFunc(const std::string & name, 
-      const qjs::Value& getter1, const qjs::Value& setter1, int flags = JS_PROP_ENUMERABLE){
+  void setPropertyFunc(const std::string &name, const qjs::Value &getter1,
+                       const qjs::Value &setter1,
+                       int flags = JS_PROP_ENUMERABLE) {
     auto ctx = context();
     JSAtom atom = JS_NewAtom(ctx, name.c_str());
     JSValue getter = getter1.rawdup();
@@ -528,11 +623,10 @@ public:
    * @param setter Setter function.
    * @param flags JS property flags.
    */
-  void setPropertyFunc(const std::string & name,
-    const std::function<Value(Value*)> &getter1, 
-    const std::function<Value(Value*, Value*)> &setter1,
-    int flags = JS_PROP_ENUMERABLE
-  );
+  void setPropertyFunc(const std::string &name,
+                       const std::function<Value(Value *)> &getter1,
+                       const std::function<Value(Value *, Value *)> &setter1,
+                       int flags = JS_PROP_ENUMERABLE);
 
   /**
    * @brief Sets an element in an array.
@@ -670,6 +764,118 @@ protected:
   JSValue value_ = JS_UNDEFINED;
 };
 
+[[noreturn]]
+void throw_qjs_exception(const std::string &error);
+
+template <bool HasVal, typename F, typename Tuple, size_t... Is>
+auto invoke_array(F &&lambda, Value *val, const Array *arr,
+                  std::index_sequence<Is...>) {
+  if constexpr (HasVal) {
+    return std::invoke(
+        std::forward<F>(lambda), val,
+        arr->get(Is).template as<std::tuple_element_t<Is + 1, Tuple>>()...);
+  } else {
+    return std::invoke(
+        std::forward<F>(lambda),
+        arr->get(Is).template as<std::tuple_element_t<Is, Tuple>>()...);
+  }
+}
+
+template <typename T, typename F, typename JsArgsTuple, size_t... Is>
+auto invoke_method(F &&lambda, T *val, const Array *arr,
+                   std::index_sequence<Is...>) {
+  return std::invoke(
+      std::forward<F>(lambda), val,
+      arr->get(Is).template as<std::tuple_element_t<Is, JsArgsTuple>>()...);
+}
+
+template <typename T, std::enable_if_t<is_not_jsvalue<T>, int> = 0>
+qjs::Value convertToValue(T t, JSContext *ctx) {
+  return qjs::Value(ctx, t);
+}
+
+template <typename T, std::enable_if_t<!is_not_jsvalue<T>, int> = 0>
+qjs::Value convertToValue(T t, JSContext *ctx) {
+  return t;
+}
+
+template <typename T> struct drop_first_element;
+
+template <typename First, typename... Rest>
+struct drop_first_element<std::tuple<First, Rest...>> {
+  using type = std::tuple<Rest...>;
+};
+
+template <typename F>
+auto wrap_method(F &&lambda, JSContext *ctx, JSClassID id) {
+  using DecayedF = std::decay_t<F>;
+
+  // Full traits including the object pointer
+  using full_args_tuple = typename callable_traits<DecayedF>::args_tuple;
+  using base_type = typename callable_traits<DecayedF>::base_type;
+  using return_type = typename callable_traits<DecayedF>::return_type;
+
+  // Strip the 'this' pointer to get actual JavaScript arguments
+  using js_args_tuple = typename drop_first_element<full_args_tuple>::type;
+  constexpr size_t js_args_count = std::tuple_size_v<js_args_tuple>;
+
+  // Capture lambda using correct forwarding syntax
+  return [id, ctx, lambda = std::forward<F>(lambda)](
+             Value *val, Array *arr) mutable -> Value {
+    if (arr->size() < js_args_count) {
+      throw_qjs_exception("Invalid argument count");
+    }
+
+    auto base = (base_type *)val->as(id);
+    if (base == nullptr) {
+      throw_qjs_exception("Invalid object pointer");
+    }
+
+    // Handle 'void' returns using C++17 if constexpr
+    if constexpr (std::is_void_v<return_type>) {
+      invoke_method<base_type, F, js_args_tuple>(
+          lambda, base, arr, std::make_index_sequence<js_args_count>{});
+      return qjs::Value(ctx, JS_UNDEFINED, true);
+    } else {
+      return convertToValue(
+          invoke_method<base_type, F, js_args_tuple>(
+              lambda, base, arr, std::make_index_sequence<js_args_count>{}),
+          ctx);
+    }
+  };
+}
+
+template <typename F> auto wrap_lambda(F &&lambda, JSContext *ctx) {
+  using DecayedF = std::decay_t<F>;
+  using args_tuple = typename callable_traits<DecayedF>::args_tuple;
+
+  using return_type = typename callable_traits<DecayedF>::return_type;
+  constexpr size_t total_args = callable_traits<DecayedF>::args_count;
+  constexpr bool has_val_param =
+      total_args > 0 &&
+      std::is_same_v<std::tuple_element_t<0, args_tuple>, Value *>;
+  constexpr size_t js_args_count =
+      has_val_param ? (total_args - 1) : total_args;
+
+  return [ctx, lambda = std::forward<F>(lambda)](Value *val,
+                                                 Array *arr) mutable -> Value {
+    if (arr->size() >= js_args_count) {
+      if constexpr (std::is_void_v<return_type>) {
+        invoke_array<has_val_param, F, args_tuple>(
+            lambda, val, arr, std::make_index_sequence<js_args_count>{});
+        return qjs::Value(ctx, JS_UNDEFINED, true);
+      } else {
+        return convertToValue(
+            invoke_array<has_val_param, F, args_tuple>(
+                lambda, val, arr, std::make_index_sequence<js_args_count>{}),
+            ctx);
+      }
+    } else {
+      throw_qjs_exception("Invalid argument count");
+    }
+  };
+}
+
 class VectorArray : public Array, public std::vector<Value> {
 public:
   virtual ~VectorArray() override { this->clear(); }
@@ -718,9 +924,8 @@ template <typename T> bool Map::set(const std::string &index, T value) {
   return set(index, qjs::Value(context(), value));
 }
 
-qjs::Value
-Callback::call(Value *val, // NOLINT(misc-definitions-in-headers)
-               Array *array) {
+qjs::Value Callback::call(Value *val, // NOLINT(misc-definitions-in-headers)
+                          Array *array) {
   bool delete_array = array == nullptr;
   if (delete_array) {
     array = newEmptyArray(ctx);
@@ -795,60 +1000,58 @@ public:
 
 private:
   void free() {
-        for (auto &iter : finalizer_map) {   // use reference
-            auto name = iter.second.def.class_name;
-            iter.second.def.class_name = nullptr;
-            if (name != nullptr) {
-                ::free((void *)name);        // ensure memory was dynamically allocated
-            }
-        }
-        finalizer_map.clear();
+    for (auto &iter : finalizer_map) { // use reference
+      auto name = iter.second.def.class_name;
+      iter.second.def.class_name = nullptr;
+      if (name != nullptr) {
+        ::free((void *)name); // ensure memory was dynamically allocated
+      }
+    }
+    finalizer_map.clear();
   }
 };
 
-qjs::Value Function::invoke(){ // NOLINT(misc-definitions-in-headers)
-  return this->invoke(nullptr, (Array*)nullptr);
+qjs::Value Function::invoke() { // NOLINT(misc-definitions-in-headers)
+  return this->invoke(nullptr, (Array *)nullptr);
 }
 
-template <typename Array, std::enable_if_t<(is_array_or_derived<Array> ), int> >
-qjs::Value Function::invoke(Value *th, Array* Ts) {
-    bool delete_array = Ts == nullptr;
-    bool delete_value = th == nullptr;
-    qjs::Array * arr;
-    
-    if (delete_array) {
-      arr = newEmptyArray(this->context());
-    } else {
-      arr = Ts;
-    }
+template <typename Array, std::enable_if_t<(is_array_or_derived<Array>), int>>
+qjs::Value Function::invoke(Value *th, Array *Ts) {
+  bool delete_array = Ts == nullptr;
+  bool delete_value = th == nullptr;
+  qjs::Array *arr;
 
-    if (delete_value){
-      th = new qjs::Value(this->context(), JS_UNDEFINED, false);
-    }
+  if (delete_array) {
+    arr = newEmptyArray(this->context());
+  } else {
+    arr = Ts;
+  }
 
-    auto ret = this->call(th, arr);
-    if (delete_value){
-      delete th;
-    }
-    if (delete_array){
-      delete arr;
-    }
-    return ret;
+  if (delete_value) {
+    th = new qjs::Value(this->context(), JS_UNDEFINED, false);
+  }
+
+  auto ret = this->call(th, arr);
+  if (delete_value) {
+    delete th;
+  }
+  if (delete_array) {
+    delete arr;
+  }
+  return ret;
 };
 
-template <typename... T,
-          std::enable_if_t<all_not_array<T...>::value, int> >
-qjs::Value Function::invoke(qjs::Value *th, T&&... xs)
-{
-    auto ctx = this->context();
+template <typename... T, std::enable_if_t<all_not_array<T...>::value, int>>
+qjs::Value Function::invoke(qjs::Value *th, T &&...xs) {
+  auto ctx = this->context();
 
-    VectorArray arr(ctx);
-    arr.reserve(sizeof...(T));
+  VectorArray arr(ctx);
+  arr.reserve(sizeof...(T));
 
-    // Expand arguments safely
-    (arr.emplace_back(ctx, std::forward<T>(xs)), ...);
+  // Expand arguments safely
+  (arr.emplace_back(ctx, std::forward<T>(xs)), ...);
 
-    return this->invoke(th, &arr);
+  return this->invoke(th, &arr);
 }
 
 static void function_finalizer(JSRuntime *rt, JSValue val);
@@ -864,7 +1067,7 @@ getClasses(JSRuntime *rt) { // NOLINT(misc-definitions-in-headers)
   if (cls == nullptr) {
     cls = new QuickJS_CppClasses();
     finalize_pointer((void *)cls, [](void *p) -> void {
-      auto cls =  static_cast<QuickJS_CppClasses*>(p);
+      auto cls = static_cast<QuickJS_CppClasses *>(p);
       cls->free();
     });
     JSClassID clsID = 0;
@@ -973,7 +1176,7 @@ void finalize_pointer(void *ptr, std::function<void(void *)> fn) {
           iter->second(ptr);
         }
         finalizers.erase(iter);
-      } 
+      }
       free(ptr);
     } else {
       finalizers[ptr] = fn;
@@ -1007,8 +1210,11 @@ public:
 
   ~Context() { free(); }
 
-
-  #define CONTEXT_ASSIGN_MOVE(val) this->ctx_ = val.ctx_; this->rt_ = val.rt_; this->owned = val.owned; val.owned = false;
+#define CONTEXT_ASSIGN_MOVE(val)                                               \
+  this->ctx_ = val.ctx_;                                                       \
+  this->rt_ = val.rt_;                                                         \
+  this->owned = val.owned;                                                     \
+  val.owned = false;
 
   Context &operator=(Context &&val) noexcept {
     CONTEXT_ASSIGN_MOVE(val);
@@ -1017,24 +1223,24 @@ public:
 
   Context(Context &&val) noexcept { CONTEXT_ASSIGN_MOVE(val); }
 
-
   JSContext *get() const { return ctx_; }
 
   template <typename T> qjs::Value newValue(T t) { return qjs::Value(ctx_, t); }
 
-  Value getClassProto(JSClassID id){
+  Value getClassProto(JSClassID id) {
     JSValue proto = JS_GetClassProto(ctx_, id);
     return Value(ctx_, proto, true);
   }
 
   JSClassID newClassID(const std::string &name,
-                       const std::function<void(void *)> &finalizer = nullptr, Value * proto_ptr = nullptr) {
+                       const std::function<void(void *)> &finalizer = nullptr,
+                       Value *proto_ptr = nullptr) {
     auto classmap = getClasses(ctx_);
     JSClassID id = 0;
     auto runtime = JS_GetRuntime(ctx_);
     JS_NewClassID(runtime, &id);
     auto proto = JS_NewObject(ctx_);
-    if (proto_ptr != nullptr){
+    if (proto_ptr != nullptr) {
       *proto_ptr = Value(ctx_, proto, false);
     }
     JS_SetClassProto(ctx_, id, proto);
@@ -1080,6 +1286,12 @@ public:
     return newFunction(call);
   }
 
+  template <typename T, std::enable_if_t<is_template_function<T>, int> = 0>
+  qjs::Value newFunction(T fn) {
+    std::function<Value(Value *, Array *)> fn1 = wrap_lambda(fn, this->ctx_);
+    return newFunction(fn1);
+  }
+
   qjs::Value getGlobal() {
     return qjs::Value(ctx_, JS_GetGlobalObject(ctx_), true);
   }
@@ -1099,10 +1311,7 @@ public:
     return global.drop(name);
   }
 
-  template <
-      typename T,
-      std::enable_if_t<!std::is_same_v<std::decay_t<T>, Value>, int> = 0,
-      std::enable_if_t<!std::is_same_v<std::decay_t<T>, JSValue>, int> = 0>
+  template <typename T, std::enable_if_t<is_not_jsvalue<T>, int> = 0>
   bool setGlobal(const std::string &name, T val) {
     return setGlobal(name, qjs::Value(ctx_, val));
   };
@@ -1148,28 +1357,27 @@ private:
   }
 };
 
-  Context Value::getContext() const {  // NOLINT(misc-definitions-in-headers)
-    return this->Array::getContext();
-  }
+Context Value::getContext() const { // NOLINT(misc-definitions-in-headers)
+  return this->Array::getContext();
+}
 
-  void Value::setPropertyFunc(const std::string & name, // NOLINT(misc-definitions-in-headers)
-    const std::function<Value(Value*)> &getter1, 
-    const std::function<Value(Value*, Value*)> &setter1,
-    int flags
-  ){
-    auto ctx = getContext();
+void Value::setPropertyFunc( // NOLINT(misc-definitions-in-headers)
+    const std::string &name, 
+    const std::function<Value(Value *)> &getter1,
+    const std::function<Value(Value *, Value *)> &setter1, int flags) {
+  auto ctx = getContext();
 
-    qjs::Value getter = ctx.newFunction([getter1](Value * th, Array * ar)->qjs::Value { 
-      return getter1(th); 
-    });
+  qjs::Value getter = ctx.newFunction(
+      [getter1](Value *th, Array *ar) -> qjs::Value { return getter1(th); });
 
-    qjs::Value setter = ctx.newFunction([setter1](Value * th, Array * ar)->qjs::Value { 
-      qjs::Value val = ar->get(0);
-      return setter1(th, &val);
-    });
+  qjs::Value setter =
+      ctx.newFunction([setter1](Value *th, Array *ar) -> qjs::Value {
+        qjs::Value val = ar->get(0);
+        return setter1(th, &val);
+      });
 
-    setPropertyFunc(name, getter, setter, flags);
-  };
+  setPropertyFunc(name, getter, setter, flags);
+};
 
 template <> inline bool Value::is<std::vector<Value>>() const {
   return isArray();
@@ -1193,6 +1401,8 @@ template <> inline bool Value::is<std::string>() const { return isString(); }
 
 class Exception : public std::runtime_error {
 public:
+  explicit Exception(const std::string &error) : std::runtime_error(error) {}
+
   explicit Exception(JSContext *ctx, const std::string &error = "")
       : std::runtime_error(extract(ctx, error)) {}
 
@@ -1308,12 +1518,35 @@ inline void throwIfException(JSContext *ctx, JSValueConst value) {
   throw qjs::Exception(ctx);
 }
 
-Context ContextGetter::getContext() const { // NOLINT(misc-definitions-in-headers)
+Context
+ContextGetter::getContext() const { // NOLINT(misc-definitions-in-headers)
   return qjs::Context(this->context(), false);
 }
 
 inline void throwIfException(JSContext *ctx, qjs::Value &value) {
   throwIfException(ctx, value.raw());
 }
+
+Value newFunctionValue(JSContext *ctx, qjs::Function *func) {
+  qjs::Context context(ctx, false);
+  return context.newFunction(func);
+};
+
+Value newFunctionValue(JSContext *ctx,
+                       std::function<Value(Value *, Array *)> func) {
+  qjs::Context context(ctx, false);
+  return context.newFunction(func);
+};
+
+template <typename T, std::enable_if_t<is_template_function<T>, int>>
+Value newFunctionValue(JSContext *ctx, T fn) {
+  qjs::Context context(ctx, false);
+  return context.newFunction(fn);
+};
+
+void throw_qjs_exception( // NOLINT(misc-definitions-in-headers)
+    const std::string &error) { 
+  throw qjs::Exception(error);
+};
 
 } // namespace qjs
