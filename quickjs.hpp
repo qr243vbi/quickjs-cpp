@@ -19,6 +19,22 @@
 
 namespace qjs {
 
+    // Generates a lambda to GET a field value
+    template <typename ClassType, typename FieldType>
+    static auto make_getter(FieldType ClassType::*field_ptr) {
+        return [field_ptr](ClassType* instance) -> FieldType {
+            return instance->*field_ptr;
+        };
+    }
+
+    // Generates a lambda to SET a field value
+    template <typename ClassType, typename FieldType>
+    static auto make_setter(FieldType ClassType::*field_ptr) {
+        return [field_ptr](ClassType* instance, FieldType value) -> FieldType {
+            return instance->*field_ptr = value;
+        };
+    }
+
 class Value;
 
 #ifdef QUICKJS_USE_QT
@@ -785,13 +801,31 @@ public:
   template <typename Ret, typename Base, typename... Args>
   bool setMethod(const std::string &name, Ret (Base::*func)(Args...) const);
 
+  template <typename ClassType, typename FieldType>
+  bool setProperty(const std::string & value, FieldType ClassType::*field_ptr, int flags = JS_PROP_ENUMERABLE){
+    if (!isObject()){
+      return false;
+    }
+    this->setPropertyFunc(
+      value.c_str(), 
+      make_getter(field_ptr),
+      make_setter(field_ptr),
+      flags
+    );
+    return true;
+  }
+
   bool makeConstructor(qjs::Value *proto) {
     if (!JS_IsFunction(ctx_, value_)) {
       return false;
     }
+    JSValue proto_ = proto->raw();
+    if (!JS_IsObject(value_)) {
+      return false;
+    }
     JS_SetConstructorBit(ctx_, value_, 1);
 
-    return JS_SetConstructor(ctx_, value_, proto->raw()) == 0;
+    return JS_SetConstructor(ctx_, value_, proto_) == 0;
   };
 
   bool makeConstructor(qjs::Value proto) { return makeConstructor(&proto); };
@@ -840,6 +874,13 @@ public:
   template <typename N, typename Ret, typename Base, typename... Args,
             std::enable_if_t<is_qtstring_or_derived<N>, int> = 0>
   bool setMethod(N name, Ret (Base::*func)(Args...) const);
+
+
+  template <typename N, typename ClassType, typename FieldType,
+            std::enable_if_t<is_qtstring_or_derived<N>, int> = 0>
+  bool setProperty(N value, FieldType ClassType::*field_ptr, int flags = JS_PROP_ENUMERABLE){
+    return setProperty(value.toStdString(), field_ptr, flags);
+  }
 
 #endif
 
@@ -1252,8 +1293,8 @@ private:
 
 QuickJS_CppClasses *getClasses(JSRuntime *rt);
 
-void ClassWrapperFinalize(
-    JSRuntime *rt, JSValueConst val) { // NOLINT(misc-definitions-in-headers)
+void ClassWrapperFinalize( // NOLINT(misc-definitions-in-headers)
+    JSRuntime *rt, JSValueConst val) {
   auto classes = getClasses(rt);
   auto classid = JS_GetClassID(val);
   if (classid == JS_INVALID_CLASS_ID) {
@@ -1772,14 +1813,7 @@ template <> inline std::string Value::as<std::string>() const {
 
   return result;
 }
-/*
-template <> inline std::nullptr_t Value::as<std::nullptr_t>() const {
-  if (!JS_IsNull(raw()))
-    throw std::bad_cast();
 
-  return nullptr;
-}
-*/
 template <> inline bool Value::as<bool>() const {
   auto value_ = raw();
   auto ctx_ = context();
