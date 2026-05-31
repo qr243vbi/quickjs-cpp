@@ -1936,7 +1936,7 @@ inline void Value::assign_value<QString>(JSContext *ctx, QString value) {
 
 QVariant jsValueToQVariant(JSContext *ctx, JSValueConst val);
 
-QVariantMap jsValueToQVariantMap(JSContext *ctx, JSValueConst val) {
+QVariantMap jsValueToQVariantMap(JSContext *ctx, JSValueConst val) { // NOLINT(misc-definitions-in-headers)
   QVariantMap map;
   if (JS_IsObject(val)) {
     if (!JS_IsArray(val)) {
@@ -1964,7 +1964,28 @@ QVariantMap jsValueToQVariantMap(JSContext *ctx, JSValueConst val) {
   return map;
 }
 
-QVariantList jsValueToQVariantList(JSContext *ctx, JSValueConst val) {
+
+QStringList jsValueToQStringList(JSContext *ctx, JSValueConst val) { // NOLINT(misc-definitions-in-headers)
+  QStringList list;
+  if (JS_IsObject(val)) {
+    if (JS_IsArray(val)) {
+
+      JSValue lenVal = JS_GetPropertyStr(ctx, val, "length");
+      int64_t length = 0;
+      JS_ToInt64(ctx, &length, lenVal);
+      JS_FreeValue(ctx, lenVal);
+
+      for (int64_t i = 0; i < length; ++i) {
+        JSValue element = JS_GetPropertyUint32(ctx, val, i);
+        list.append(jsValueToQVariant(ctx, element).toString());
+        JS_FreeValue(ctx, element); // Decrement reference count
+      }
+    }
+  }
+  return list;
+}
+
+QVariantList jsValueToQVariantList(JSContext *ctx, JSValueConst val) { // NOLINT(misc-definitions-in-headers)
   QVariantList list;
   if (JS_IsObject(val)) {
     if (JS_IsArray(val)) {
@@ -1984,7 +2005,7 @@ QVariantList jsValueToQVariantList(JSContext *ctx, JSValueConst val) {
   return list;
 }
 
-QVariant jsValueToQVariant(JSContext *ctx, JSValueConst val) {
+QVariant jsValueToQVariant(JSContext *ctx, JSValueConst val) { // NOLINT(misc-definitions-in-headers)
   if (JS_IsNull(val) || JS_IsUndefined(val)) {
     return QVariant();
   }
@@ -2022,7 +2043,7 @@ QVariant jsValueToQVariant(JSContext *ctx, JSValueConst val) {
 
 JSValue qvariantToJSValue(JSContext *ctx, const QVariant &var);
 
-JSValue qvariantMapToJSValue(JSContext *ctx, const QVariantMap &map) {
+JSValue qvariantMapToJSValue(JSContext *ctx, const QVariantMap &map) { // NOLINT(misc-definitions-in-headers)
   JSValue jsObj = JS_NewObject(ctx);
 
   QMapIterator<QString, QVariant> i(map);
@@ -2035,7 +2056,7 @@ JSValue qvariantMapToJSValue(JSContext *ctx, const QVariantMap &map) {
   return jsObj;
 }
 
-JSValue qvariantListToJSValue(JSContext *ctx, const QVariantList &list) {
+JSValue qvariantListToJSValue(JSContext *ctx, const QVariantList &list) { // NOLINT(misc-definitions-in-headers)
   JSValue jsArray = JS_NewArray(ctx);
 
   for (int i = 0; i < list.size(); ++i) {
@@ -2045,7 +2066,18 @@ JSValue qvariantListToJSValue(JSContext *ctx, const QVariantList &list) {
   return jsArray;
 }
 
-JSValue qvariantToJSValue(JSContext *ctx, const QVariant &var) {
+
+JSValue qstringListToJSValue(JSContext *ctx, const QStringList &list) { // NOLINT(misc-definitions-in-headers)
+  JSValue jsArray = JS_NewArray(ctx);
+
+  for (int i = 0; i < list.size(); ++i) {
+    JSValue element = qvariantToJSValue(ctx, list.at(i));
+    JS_SetPropertyUint32(ctx, jsArray, i, element);
+  }
+  return jsArray;
+}
+
+JSValue qvariantToJSValue(JSContext *ctx, const QVariant &var) { // NOLINT(misc-definitions-in-headers)
   if (!var.isValid() || var.isNull()) {
     return JS_NULL;
   }
@@ -2115,6 +2147,17 @@ template <>
 inline void Value::assign_value<QVariantList>(JSContext *ctx,
                                               QVariantList value) {
   assign(ctx, qvariantListToJSValue(ctx, value), true);
+}
+
+template <> inline bool Value::is<QStringList>() const { return isArray(); }
+
+template <> inline QStringList Value::as<QStringList>() const {
+  return jsValueToQStringList(ctx_, value_);
+}
+template <>
+inline void Value::assign_value<QStringList>(JSContext *ctx,
+                                              QStringList value) {
+  assign(ctx, qstringListToJSValue(ctx, value), true);
 }
 
 template <typename T, std::enable_if_t<is_qtstring_or_derived<T>, int>>
