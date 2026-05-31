@@ -13,13 +13,18 @@
 #ifdef QUICKJS_USE_QT
 #include <QString>
 #include <QVariant>
-#include <QVariantMap>
 #include <QVariantList>
+#include <QVariantMap>
 #endif
 
 namespace qjs {
 
 class Value;
+
+#ifdef QUICKJS_USE_QT
+template <typename T>
+constexpr bool is_qtstring_or_derived = std::is_base_of_v<QString, T>;
+#endif
 
 class Context;
 
@@ -110,6 +115,7 @@ public:
  *
  * Derived classes are expected to implement storage and lifecycle semantics.
  */
+
 class Map : public ContextGetter {
 public:
   /**
@@ -120,6 +126,17 @@ public:
    */
   virtual qjs::Value get(const std::string &name) const = 0;
 
+#ifdef QUICKJS_USE_QT
+  template <typename T, std::enable_if_t<is_qtstring_or_derived<T>, int> = 0>
+  qjs::Value get(T name) const;
+  template <typename T, std::enable_if_t<is_qtstring_or_derived<T>, int> = 0>
+  bool set(T name, qjs::Value value);
+  template <typename T, std::enable_if_t<is_qtstring_or_derived<T>, int> = 0>
+  bool drop(T name);
+  template <typename V, typename T,
+            std::enable_if_t<is_qtstring_or_derived<T>, int> = 0>
+  bool set(T index, V value);
+#endif
   /**
    * @brief Sets a property value by name.
    *
@@ -163,7 +180,7 @@ public:
 };
 
 template <typename T>
-constexpr bool is_array_or_derived = std::is_base_of<Array, T>::value;
+constexpr bool is_array_or_derived = std::is_base_of_v<Array, T>;
 
 template <typename T>
 constexpr bool is_not_jsvalue =
@@ -400,6 +417,17 @@ protected:
   }
 
 public:
+#ifdef QUICKJS_USE_QT
+  template <typename T, std::enable_if_t<is_qtstring_or_derived<T>, int> = 0>
+  qjs::Value get(T name) const;
+  template <typename T, std::enable_if_t<is_qtstring_or_derived<T>, int> = 0>
+  bool set(T name, qjs::Value value);
+  template <typename T, std::enable_if_t<is_qtstring_or_derived<T>, int> = 0>
+  bool drop(T name);
+  template <typename V, typename T,
+            std::enable_if_t<is_qtstring_or_derived<T>, int> = 0>
+  bool set(T index, V value);
+#endif
   /**
    * @brief Deletes a property from an object.
    *
@@ -494,14 +522,12 @@ public:
    * @param ctx QuickJS context.
    * @param value Double value to wrap.
    */
-  template <typename T, std::enable_if_t<  
-    std::is_convertible_v<T, double> &&  
-    !std::is_same_v<T, bool> 
-  , int> = 0>
+  template <typename T, std::enable_if_t<std::is_convertible_v<T, double> &&
+                                             !std::is_same_v<T, bool>,
+                                         int> = 0>
   void assign(JSContext *ctx, T value) {
     assign(ctx, JS_NewFloat64(ctx, (double)value), true);
   }
-
 
   /**
    * @brief Assigns a numeric value.
@@ -513,7 +539,6 @@ public:
     assign(ctx, JS_NewBool(ctx, value), true);
   }
 
-
   /**
    * @brief Assigns a string value.
    *
@@ -522,6 +547,10 @@ public:
    */
   void assign(JSContext *ctx, const std::string &value) {
     JSValue v = JS_NewStringLen(ctx, value.c_str(), value.size());
+    assign(ctx, v, true); // consumes v
+  }
+  void assign(JSContext *ctx, const char *value) {
+    JSValue v = JS_NewStringLen(ctx, value, strlen(value));
     assign(ctx, v, true); // consumes v
   }
 
@@ -556,18 +585,22 @@ public:
     assign(ctx, newFunctionValue(ctx, value).rawdup(), true); // consumes v
   }
 
-  template <typename T>
-  void assign_value(JSContext *ctx, T value);
+  template <typename T> void assign_value(JSContext *ctx, T value);
 
-
-  template <typename T, std::enable_if_t<
-    !is_template_function<T> &&
-    !std::is_convertible_v<T, std::function<Value(Value *, Array *)>> &&  
-    !std::is_convertible_v<T, Function*> &&  
-    !std::is_convertible_v<T, const std::string &> &&  
-    !std::is_convertible_v<T, double> &&  
-    !std::is_convertible_v<T, bool> 
-  , int> = 0>
+  template <
+      typename T,
+      std::enable_if_t<!is_template_function<T> &&
+                           !std::is_convertible_v<
+                               T, std::function<Value(Value *, Array *)>> &&
+                           !std::is_convertible_v<T, Function *> &&
+                           !std::is_convertible_v<T, const std::string &> &&
+                           !std::is_convertible_v<T, const std::string &> &&
+                           !std::is_convertible_v<T, const char *> &&
+                           !std::is_convertible_v<T, char *> &&
+                           !std::is_convertible_v<T, char[]> &&
+                           !std::is_convertible_v<T, double> &&
+                           !std::is_convertible_v<T, bool>,
+                       int> = 0>
   void assign(JSContext *ctx, T value) {
     assign_value(ctx, value); // consumes v
   }
@@ -655,6 +688,13 @@ public:
     JS_FreeAtom(ctx, atom);
   }
 
+#ifdef QUICKJS_USE_QT
+  template <typename A, typename B, typename T,
+            std::enable_if_t<is_qtstring_or_derived<T>, int> = 0>
+  void setPropertyFunc(T name, A getter1, B setter1,
+                       int flags = JS_PROP_ENUMERABLE);
+#endif
+
   /**
    * @brief Sets a property with functional getter/setter.
    *
@@ -663,11 +703,11 @@ public:
    * @param setter Setter function.
    * @param flags JS property flags.
    */
-  template <typename T, typename D, std::enable_if_t<is_template_function<T> && is_template_function<D>, int> = 0>
-  void setPropertyFunc(const std::string &name, 
-                       const T &getter1,
-                       const D &setter1,
-                       int flags = JS_PROP_ENUMERABLE);
+  template <typename T, typename D,
+            std::enable_if_t<is_template_function<T> && is_template_function<D>,
+                             int> = 0>
+  void setPropertyFunc(const std::string &name, const T &getter1,
+                       const D &setter1, int flags = JS_PROP_ENUMERABLE);
 
   /**
    * @brief Sets an element in an array.
@@ -687,7 +727,7 @@ public:
     }
   }
 
-    /**
+  /**
    * @brief Invokes the function with an explicit this-value and argument array.
    *
    * @tparam Array A type derived from qjs::Array
@@ -698,7 +738,7 @@ public:
 
   template <typename Array,
             std::enable_if_t<(is_array_or_derived<Array>), int> = 0>
-  qjs::Value invoke(qjs::Value *th, Array *xs){
+  qjs::Value invoke(qjs::Value *th, Array *xs) {
     return this->Function::invoke(th, xs);
   };
 
@@ -707,9 +747,7 @@ public:
    *
    * @return Result of function execution
    */
-  qjs::Value invoke(){
-    return this->Function::invoke();
-  };
+  qjs::Value invoke() { return this->Function::invoke(); };
 
   /**
    * @brief Invokes the function with variadic arguments and explicit
@@ -724,25 +762,86 @@ public:
    */
   template <typename... T,
             std::enable_if_t<all_not_array<T...>::value, int> = 0>
-  qjs::Value invoke(qjs::Value *th, T &&...xs){
+  qjs::Value invoke(qjs::Value *th, T &&...xs) {
     return this->Function::invoke(th, xs...);
   };
 
   template <typename Array,
-    std::enable_if_t<(is_array_or_derived<Array>), int> = 0>
-  qjs::Value invoke(const std::string & name, Array *xs){
+            std::enable_if_t<is_array_or_derived<Array>, int> = 0>
+  qjs::Value invoke(const std::string &name, Array *xs) {
     return this->get(name).invoke(this, xs);
   };
 
   template <typename... T,
-    std::enable_if_t<all_not_array<T...>::value, int> = 0>
-  qjs::Value invoke(const std::string &th, T &&...xs){
-    auto value =  this->get(th);
+            std::enable_if_t<all_not_array<T...>::value, int> = 0>
+  qjs::Value invoke(const std::string &th, T &&...xs) {
+    auto value = this->get(th);
     return value.invoke(this, xs...);
   };
 
-  template<typename Ret, typename Base, typename ... Args>
-  bool setMethod(const std::string & name, Ret (Base::* func) (Args...));
+  template <typename Ret, typename Base, typename... Args>
+  bool setMethod(const std::string &name, Ret (Base::*func)(Args...));
+
+  template <typename Ret, typename Base, typename... Args>
+  bool setMethod(const std::string &name, Ret (Base::*func)(Args...) const);
+
+  bool makeConstructor(qjs::Value *proto) {
+    if (!JS_IsFunction(ctx_, value_)) {
+      return false;
+    }
+    JS_SetConstructorBit(ctx_, value_, 1);
+
+    return JS_SetConstructor(ctx_, value_, proto->raw()) == 0;
+  };
+
+  bool makeConstructor(qjs::Value proto) { return makeConstructor(&proto); };
+
+  bool makeConstructor() {
+    return makeConstructor(qjs::Value(ctx_, JS_NewObject(ctx_), true));
+  }
+
+  bool setConstructor(qjs::Value *func) {
+    if (!isObject()) {
+      return false;
+    }
+    return func->makeConstructor((qjs::Value *)this);
+  }
+
+  bool setConstructor(qjs::Value proto) { return setConstructor(&proto); };
+
+  template <typename A, std::enable_if_t<is_not_jsvalue<A>, int> = 0>
+  bool setConstructor(A fn) {
+    qjs::Value val = newFunctionValue(ctx_, fn);
+    return setConstructor(val);
+  };
+
+#ifdef QUICKJS_USE_QT
+  template <
+      typename T, typename Array,
+      std::enable_if_t<is_array_or_derived<Array> && is_qtstring_or_derived<T>,
+                       int> = 0>
+  qjs::Value invoke(T name, Array *xs) {
+    return this->get(name.toStdString()).invoke(this, xs);
+  };
+
+  template <
+      typename N, typename... T,
+      std::enable_if_t<all_not_array<T...>::value && is_qtstring_or_derived<N>,
+                       int> = 0>
+  qjs::Value invoke(N name, T &&...xs) {
+    auto value = this->get(name.toStdString());
+    return value.invoke(this, xs...);
+  };
+
+  template <typename N, typename Ret, typename Base, typename... Args,
+            std::enable_if_t<is_qtstring_or_derived<N>, int> = 0>
+  bool setMethod(N name, Ret (Base::*func)(Args...));
+
+  template <typename N, typename Ret, typename Base, typename... Args,
+            std::enable_if_t<is_qtstring_or_derived<N>, int> = 0>
+  bool setMethod(N name, Ret (Base::*func)(Args...) const);
+
+#endif
 
   /**
    * @brief Sets a property in an object.
@@ -813,7 +912,7 @@ public:
 
   ClassID getClassID() { return JS_GetClassID(value_); }
 
-  void * asOpaque() { return as(getClassID()); }
+  void *asOpaque() { return as(getClassID()); }
 
   bool isOpaque() { return is(getClassID()); }
 
@@ -844,9 +943,8 @@ public:
   bool isBigInt() const { return JS_VALUE_GET_TAG(raw()) == JS_TAG_BIG_INT; }
 
   virtual ~Value() { free(); }
-  
-  template<typename F>
-  friend auto wrap_method(F member_ptr, JSContext * ctx);
+
+  template <typename F> friend auto wrap_method(F member_ptr, JSContext *ctx);
   friend void throwIfException(JSContext *ctx, qjs::Value &value);
   friend class PointerArray;
   friend class Context;
@@ -872,12 +970,31 @@ protected:
 [[noreturn]]
 void throw_qjs_exception(const std::string &error);
 
-template <bool HasVal, typename F, typename Tuple, size_t... Is>
+template <bool HasVal, bool HasPointer, typename F, typename Tuple,
+          size_t... Is>
 auto invoke_array(F &&lambda, Value *val, const Array *arr,
                   std::index_sequence<Is...>) {
   if constexpr (HasVal) {
     return std::invoke(
         std::forward<F>(lambda), val,
+        arr->get(Is).template as<std::tuple_element_t<Is + 1, Tuple>>()...);
+  } else if constexpr (HasPointer) {
+    using RawType = std::tuple_element_t<0, Tuple>;
+
+    RawType pointer = nullptr;
+    if (val != nullptr) {
+
+      pointer = static_cast<RawType>(val->asOpaque());
+
+      if constexpr (!std::is_void_v<std::remove_pointer_t<RawType>>) {
+        if (pointer == nullptr) {
+          throw_qjs_exception("Type safety violation: Target object pointer is "
+                              "invalid or mismatched type.");
+        }
+      }
+    }
+    return std::invoke(
+        std::forward<F>(lambda), pointer,
         arr->get(Is).template as<std::tuple_element_t<Is + 1, Tuple>>()...);
   } else {
     return std::invoke(
@@ -886,17 +1003,15 @@ auto invoke_array(F &&lambda, Value *val, const Array *arr,
   }
 }
 
-template <typename T>
-struct drop_first_element;
+template <typename T> struct drop_first_element;
 
 template <typename First, typename... Rest>
 struct drop_first_element<std::tuple<First, Rest...>> {
-    using type = std::tuple<Rest...>;
+  using type = std::tuple<Rest...>;
 };
 
-template <>
-struct drop_first_element<std::tuple<>> {
-    using type = std::tuple<>;
+template <> struct drop_first_element<std::tuple<>> {
+  using type = std::tuple<>;
 };
 
 template <typename T, std::enable_if_t<is_not_jsvalue<T>, int> = 0>
@@ -909,65 +1024,62 @@ qjs::Value convertToValue(T t, JSContext *ctx) {
   return t;
 }
 
-template<typename T, typename F, typename JsArgsTuple, size_t ... Is>
-auto invoke_method(F member_ptr, T* val, const Array* arr, std::index_sequence<Is...>) {
+template <typename T, typename F, typename JsArgsTuple, size_t... Is>
+auto invoke_method(F member_ptr, T *val, const Array *arr,
+                   std::index_sequence<Is...>) {
   return std::invoke(
-    member_ptr,
-    val, 
-    arr->get(Is).template as<std::tuple_element_t<Is, JsArgsTuple>>()... 
-  );
+      member_ptr, val,
+      arr->get(Is).template as<std::tuple_element_t<Is, JsArgsTuple>>()...);
 }
 
-template<typename F>
-auto wrap_method(F member_ptr, JSContext * ctx) {
-  static_assert(std::is_member_function_pointer_v<std::decay_t<F>>, 
-                "wrap_method can only be instantiated with a member function pointer.");
+template <typename F> auto wrap_method(F member_ptr, JSContext *ctx) {
+  static_assert(
+      std::is_member_function_pointer_v<std::decay_t<F>>,
+      "wrap_method can only be instantiated with a member function pointer.");
 
   using DecayedF = std::decay_t<F>;
   using base_type = typename callable_traits<DecayedF>::base_type;
   using return_type = typename callable_traits<DecayedF>::return_type;
-  using js_args_tuple = typename callable_traits<DecayedF>::args_tuple; 
+  using js_args_tuple = typename callable_traits<DecayedF>::args_tuple;
   constexpr size_t js_args_count = std::tuple_size_v<js_args_tuple>;
 
-  return [ctx, member_ptr](Value * val, Array * arr) mutable -> Value {
+  return [ctx, member_ptr](Value *val, Array *arr) mutable -> Value {
     if (val == nullptr || arr == nullptr || ctx == nullptr) {
-      throw_qjs_exception("Critical: Null execution context passed from QuickJS runtime.");
+      throw_qjs_exception(
+          "Critical: Null execution context passed from QuickJS runtime.");
     }
     auto id = JS_GetClassID(val->raw());
-    if (id == JS_INVALID_CLASS_ID){
+    if (id == JS_INVALID_CLASS_ID) {
       throw_qjs_exception("Critical: Invalid ClassID");
     }
     if (arr->size() < js_args_count) {
-      throw_qjs_exception("Argument mismatch: JavaScript provided fewer parameters than required.");
+      throw_qjs_exception("Argument mismatch: JavaScript provided fewer "
+                          "parameters than required.");
     }
-    auto base = static_cast<base_type*>(val->as(id));
+    auto base = static_cast<base_type *>(val->as(id));
     if (base == nullptr) {
-      throw_qjs_exception("Type safety violation: Target object pointer is invalid or mismatched type.");
+      throw_qjs_exception("Type safety violation: Target object pointer is "
+                          "invalid or mismatched type.");
     }
     try {
       if constexpr (std::is_void_v<return_type>) {
         invoke_method<base_type, DecayedF, js_args_tuple>(
-          member_ptr, base, arr, std::make_index_sequence<js_args_count>{}
-        );
-        return qjs::Value(ctx, JS_UNDEFINED, true); 
+            member_ptr, base, arr, std::make_index_sequence<js_args_count>{});
+        return qjs::Value(ctx, JS_UNDEFINED, true);
       } else {
-        return convertToValue( 
-          invoke_method<base_type, DecayedF, js_args_tuple>(
-            member_ptr, base, arr, std::make_index_sequence<js_args_count>{}
-          ), 
-          ctx
-        );
+        return convertToValue(invoke_method<base_type, DecayedF, js_args_tuple>(
+                                  member_ptr, base, arr,
+                                  std::make_index_sequence<js_args_count>{}),
+                              ctx);
       }
-    } 
-    catch (const std::exception& e) {
+    } catch (const std::exception &e) {
       throw_qjs_exception(e.what());
-    }
-    catch (...) {
-      throw_qjs_exception("Unknown native exception occurred during method execution.");
+    } catch (...) {
+      throw_qjs_exception(
+          "Unknown native exception occurred during method execution.");
     }
   };
 }
-
 
 template <typename F> auto wrap_lambda(F &&lambda, JSContext *ctx) {
   using DecayedF = std::decay_t<F>;
@@ -977,24 +1089,31 @@ template <typename F> auto wrap_lambda(F &&lambda, JSContext *ctx) {
   constexpr size_t total_args = callable_traits<DecayedF>::args_count;
   constexpr bool has_val_param = []() {
     if constexpr (total_args > 0) {
-        return std::is_same_v<std::tuple_element_t<0, args_tuple>, Value *>;
+      return std::is_same_v<std::tuple_element_t<0, args_tuple>, Value *>;
     } else {
-        return false;
+      return false;
+    }
+  }();
+  constexpr bool has_pointer_param = []() {
+    if constexpr (total_args > 0 && !has_val_param) {
+      return std::is_pointer_v<std::tuple_element_t<0, args_tuple>>;
+    } else {
+      return false;
     }
   }();
   constexpr size_t js_args_count =
-      has_val_param ? (total_args - 1) : total_args;
+      (has_val_param || has_pointer_param) ? (total_args - 1) : total_args;
 
   return [ctx, lambda = std::forward<F>(lambda)](Value *val,
                                                  Array *arr) mutable -> Value {
     if (arr->size() >= js_args_count) {
       if constexpr (std::is_void_v<return_type>) {
-        invoke_array<has_val_param, F, args_tuple>(
+        invoke_array<has_val_param, has_pointer_param, F, args_tuple>(
             lambda, val, arr, std::make_index_sequence<js_args_count>{});
         return qjs::Value(ctx, JS_UNDEFINED, true);
       } else {
         return convertToValue(
-            invoke_array<has_val_param, F, args_tuple>(
+            invoke_array<has_val_param, has_pointer_param, F, args_tuple>(
                 lambda, val, arr, std::make_index_sequence<js_args_count>{}),
             ctx);
       }
@@ -1105,18 +1224,16 @@ private:
 void ClassWrapperFinalize(JSRuntime *rt, JSValueConst val);
 
 struct ClassWrapper {
-  public:
+public:
   JSClassID id;
-  std::function<void(void*)> finalize;
-  ClassWrapper(const std::string &name){
+  std::function<void(void *)> finalize;
+  ClassWrapper(const std::string &name) {
     def.class_name = strdup(name.c_str());
     def.finalizer = &ClassWrapperFinalize;
     id = JS_INVALID_CLASS_ID;
   }
-  ~ClassWrapper(){
-    free((void*)def.class_name);
-  }
-  static std::shared_ptr<ClassWrapper> newWrapper(const std::string &name){
+  ~ClassWrapper() { free((void *)def.class_name); }
+  static std::shared_ptr<ClassWrapper> newWrapper(const std::string &name) {
     return std::make_shared<ClassWrapper>(name);
   }
   JSClassDef def;
@@ -1130,38 +1247,36 @@ public:
   ~QuickJS_CppClasses() { free(); }
 
 private:
-  void free() {
-    finalizer_map.clear();
-  }
+  void free() { finalizer_map.clear(); }
 };
 
 QuickJS_CppClasses *getClasses(JSRuntime *rt);
 
-void ClassWrapperFinalize(JSRuntime *rt, JSValueConst val){ // NOLINT(misc-definitions-in-headers)
+void ClassWrapperFinalize(
+    JSRuntime *rt, JSValueConst val) { // NOLINT(misc-definitions-in-headers)
   auto classes = getClasses(rt);
   auto classid = JS_GetClassID(val);
-  if (classid == JS_INVALID_CLASS_ID){
+  if (classid == JS_INVALID_CLASS_ID) {
     return;
   }
   auto opaque = JS_GetOpaque(val, classid);
-  if (opaque == nullptr){
+  if (opaque == nullptr) {
     return;
   }
   std::shared_ptr<ClassWrapper> wrapper = nullptr;
   {
     auto iter = classes->finalizer_map.find(classid);
-    if (iter != classes->finalizer_map.end()){
+    if (iter != classes->finalizer_map.end()) {
       wrapper = iter->second;
     }
   }
   if (wrapper != nullptr) {
     auto fn = wrapper->finalize;
-    if (fn != nullptr){
+    if (fn != nullptr) {
       fn(opaque);
     }
   }
 };
-
 
 qjs::Value Function::invoke() { // NOLINT(misc-definitions-in-headers)
   return this->invoke(nullptr, (Array *)nullptr);
@@ -1230,7 +1345,6 @@ getClasses(JSRuntime *rt) { // NOLINT(misc-definitions-in-headers)
   }
   return cls;
 }
-
 
 QuickJS_CppClasses *
 getClasses(JSContext *rt) { // NOLINT(misc-definitions-in-headers)
@@ -1367,14 +1481,14 @@ public:
 
   JSContext *get() const { return ctx_; }
 
-  std::shared_ptr<ClassWrapper> newClass(const std::string & name, Value proto){
+  std::shared_ptr<ClassWrapper> newClass(const std::string &name, Value proto) {
     auto wrapper = ClassWrapper::newWrapper(name);
     wrapper->id = 0;
     auto runtime = JS_GetRuntime(ctx_);
     JS_NewClassID(runtime, &wrapper->id);
     JS_NewClass(runtime, wrapper->id, &wrapper->def);
     JSValue pr;
-    if (!proto.isObject()){
+    if (!proto.isObject()) {
       proto = newObject();
     }
     pr = JS_NewObjectProto(ctx_, proto.raw());
@@ -1384,17 +1498,15 @@ public:
     return wrapper;
   }
 
-  std::shared_ptr<ClassWrapper> newClass(const std::string & name){
+  std::shared_ptr<ClassWrapper> newClass(const std::string &name) {
     return newClass(name, newObject());
   }
 
-  JSClassID newClassID(const std::string & name, Value proto){
+  JSClassID newClassID(const std::string &name, Value proto) {
     return newClass(name, proto)->id;
   }
 
-  JSClassID newClassID(const std::string & name){
-    return newClass(name)->id;
-  }
+  JSClassID newClassID(const std::string &name) { return newClass(name)->id; }
 
   template <typename T> qjs::Value newValue(T t) { return qjs::Value(ctx_, t); }
 
@@ -1444,6 +1556,13 @@ public:
     return newFunction(fn1);
   }
 
+  template <typename T>
+  qjs::Value newConstructor(T fn, const qjs::Value &proto) {
+    auto func = newFunction(fn);
+    func.setConstructor(proto);
+    return func;
+  }
+
   qjs::Value getGlobal() {
     return qjs::Value(ctx_, JS_GetGlobalObject(ctx_), true);
   }
@@ -1468,6 +1587,25 @@ public:
     return setGlobal(name, qjs::Value(ctx_, val));
   };
 
+#ifdef QUICKJS_USE_QT
+
+  template <typename T, std::enable_if_t<is_qtstring_or_derived<T>, int> = 0>
+  qjs::Value getGlobal(T name) {
+    return getGlobal(name.toStdString());
+  }
+
+  template <typename V, typename T,
+            std::enable_if_t<is_qtstring_or_derived<T>, int> = 0>
+  bool setGlobal(T name, V val) {
+    return setGlobal(name.toStdString(), val);
+  };
+
+  template <typename T, std::enable_if_t<is_qtstring_or_derived<T>, int> = 0>
+  bool dropGlobal(T name) {
+    return dropGlobal(name.toStdString());
+  }
+#endif
+
   qjs::Value newObject(JSClassID id = JS_INVALID_CLASS_ID,
                        void *opaque = nullptr) {
     qjs::Value val;
@@ -1488,6 +1626,24 @@ public:
                          JS_EVAL_TYPE_GLOBAL),
                  true);
   }
+
+#ifdef QUICKJS_USE_QT
+  template <typename T, std::enable_if_t<is_qtstring_or_derived<T>, int> = 0>
+  qjs::Value eval(T code, const std::string &filename = "<eval>") {
+    return eval(code.toStdString(), filename);
+  }
+  template <typename B, std::enable_if_t<is_qtstring_or_derived<B>, int> = 0>
+  qjs::Value eval(const std::string &code, B filename) {
+    return eval(code, filename.toStdString());
+  }
+  template <
+      typename T, typename B,
+      std::enable_if_t<is_qtstring_or_derived<T> && is_qtstring_or_derived<B>,
+                       int> = 0>
+  qjs::Value eval(T code, B filename) {
+    return eval(code.toStdString(), filename.toStdString());
+  }
+#endif
 
 private:
   JSContext *ctx_ = nullptr;
@@ -1513,22 +1669,29 @@ Context Value::getContext() const { // NOLINT(misc-definitions-in-headers)
   return this->Array::getContext();
 }
 
-template <typename T, typename D, std::enable_if_t<is_template_function<T> && is_template_function<D>, int> >
-void Value::setPropertyFunc(const std::string &name, 
-                       const T &getter1,
-                       const D &setter1,
-                       int flags){
+template <
+    typename T, typename D,
+    std::enable_if_t<is_template_function<T> && is_template_function<D>, int>>
+void Value::setPropertyFunc(const std::string &name, const T &getter1,
+                            const D &setter1, int flags) {
   auto ctx = getContext();
   qjs::Value getter = ctx.newFunction(wrap_lambda(getter1, ctx_));
   qjs::Value setter = ctx.newFunction(wrap_lambda(setter1, ctx_));
 
-  setPropertyFunc(name, getter, setter, flags);                       
+  setPropertyFunc(name, getter, setter, flags);
 };
+
+#ifdef QUICKJS_USE_QT
+template <typename A, typename B, typename T,
+          std::enable_if_t<is_qtstring_or_derived<T>, int>>
+void Value::setPropertyFunc(T name, A getter1, B setter1, int flags) {
+  setPropertyFunc(name.toStdString(), getter1, setter1, flags);
+}
+#endif
 
 template <> inline bool Value::is<std::vector<Value>>() const {
   return isArray();
 }
-
 
 template <> inline bool Value::is<std::map<std::string, Value>>() const {
   return isObject();
@@ -1592,13 +1755,9 @@ private:
   }
 };
 
-template <> inline Value Value::as<Value>() const {
-  return *this;
-}
+template <> inline Value Value::as<Value>() const { return *this; }
 
-template <> inline Value* Value::as<Value*>() const {
-  return (Value*)this;
-}
+template <> inline Value *Value::as<Value *>() const { return (Value *)this; }
 
 template <> inline std::string Value::as<std::string>() const {
   auto ctx_ = context();
@@ -1693,7 +1852,6 @@ Value newFunctionValue(JSContext *ctx,
   return context.newFunction(func);
 };
 
-
 template <typename T, std::enable_if_t<is_template_function<T>, int>>
 Value newFunctionValue(JSContext *ctx, T fn) {
   qjs::Context context(ctx, false);
@@ -1701,39 +1859,66 @@ Value newFunctionValue(JSContext *ctx, T fn) {
 };
 
 void throw_qjs_exception( // NOLINT(misc-definitions-in-headers)
-    const std::string &error) { 
+    const std::string &error) {
   throw qjs::Exception(error);
 };
 
+template <typename Ret, typename Base, typename... Args>
+bool qjs::Value::setMethod(const std::string &name,
+                           Ret (Base::*func)(Args...)) {
+  auto method = qjs::wrap_method(func, ctx_);
+  return set(name, method);
+}
 
-  template<typename Ret, typename Base, typename ... Args>
-  bool qjs::Value::setMethod(const std::string & name, Ret (Base::* func) (Args...) ){
-    auto method = qjs::wrap_method(func, ctx_);
-    return set(name, method);
-  }
-
+template <typename Ret, typename Base, typename... Args>
+bool qjs::Value::setMethod(const std::string &name,
+                           Ret (Base::*func)(Args...) const) {
+  auto method = qjs::wrap_method(func, ctx_);
+  return set(name, method);
+}
 
 #ifdef QUICKJS_USE_QT
+
+template <typename N, typename Ret, typename Base, typename... Args,
+          std::enable_if_t<is_qtstring_or_derived<N>, int>>
+bool qjs::Value::setMethod(N name, Ret (Base::*func)(Args...)) {
+  return this->setMethod(name.toStdString(), func);
+};
+
+template <typename N, typename Ret, typename Base, typename... Args,
+          std::enable_if_t<is_qtstring_or_derived<N>, int>>
+bool qjs::Value::setMethod(N name, Ret (Base::*func)(Args...) const) {
+  return this->setMethod(name.toStdString(), func);
+};
+
 template <> inline bool Value::is<QString>() const { return isString(); }
-template <> inline QString Value::as<QString>() const { return QString::fromStdString(as<std::string>()); }
-template <> inline void Value::assign_value<QString>(JSContext* ctx, QString value) { assign(ctx, value.toStdString()); }
+template <> inline QString Value::as<QString>() const {
+  return QString::fromStdString(as<std::string>());
+}
+template <>
+inline void Value::assign_value<QString>(JSContext *ctx, QString value) {
+  assign(ctx, value.toStdString());
+}
 
 QVariant jsValueToQVariant(JSContext *ctx, JSValueConst val);
 
-QVariantMap jsValueToQVariantMap(JSContext * ctx, JSValueConst val){
+QVariantMap jsValueToQVariantMap(JSContext *ctx, JSValueConst val) {
   QVariantMap map;
   if (JS_IsObject(val)) {
     if (!JS_IsArray(val)) {
       JSPropertyEnum *props = nullptr;
-      uint32_t propCount = 0;    
-      if (JS_GetOwnPropertyNames(ctx, &props, &propCount, val, JS_GPN_STRING_MASK | JS_GPN_SYMBOL_MASK) >= 0) {
+      uint32_t propCount = 0;
+      if (JS_GetOwnPropertyNames(ctx, &props, &propCount, val,
+                                 JS_GPN_STRING_MASK | JS_GPN_SYMBOL_MASK) >=
+          0) {
         for (uint32_t i = 0; i < propCount; ++i) {
           JSAtom atom = props[i].atom;
           const char *keyStr = JS_AtomToCString(ctx, atom);
-                    
+
           JSValue propVal = JS_GetProperty(ctx, val, atom);
-          map.insert(QString::fromUtf8(keyStr), jsValueToQVariant(ctx, propVal));
-                    
+          map.insert(QString::fromUtf8(keyStr),
+                     jsValueToQVariant(ctx, propVal));
+
           JS_FreeValue(ctx, propVal);
           JS_FreeCString(ctx, keyStr);
           JS_FreeAtom(ctx, atom);
@@ -1745,16 +1930,16 @@ QVariantMap jsValueToQVariantMap(JSContext * ctx, JSValueConst val){
   return map;
 }
 
-QVariantList jsValueToQVariantList(JSContext * ctx, JSValueConst val){
+QVariantList jsValueToQVariantList(JSContext *ctx, JSValueConst val) {
   QVariantList list;
   if (JS_IsObject(val)) {
     if (JS_IsArray(val)) {
-            
+
       JSValue lenVal = JS_GetPropertyStr(ctx, val, "length");
       int64_t length = 0;
       JS_ToInt64(ctx, &length, lenVal);
       JS_FreeValue(ctx, lenVal);
-            
+
       for (int64_t i = 0; i < length; ++i) {
         JSValue element = JS_GetPropertyUint32(ctx, val, i);
         list.append(jsValueToQVariant(ctx, element));
@@ -1765,47 +1950,47 @@ QVariantList jsValueToQVariantList(JSContext * ctx, JSValueConst val){
   return list;
 }
 
-QVariant jsValueToQVariant(JSContext *ctx, JSValueConst val) {    
-    if (JS_IsNull(val) || JS_IsUndefined(val)) {
-        return QVariant();
-    }
-    if (JS_IsBool(val)) {
-        return QVariant(static_cast<bool>(JS_ToBool(ctx, val)));
-    }
-    if (JS_IsNumber(val)) {
-        double d;
-        JS_ToFloat64(ctx, &d, val);
-        // Safely determine if it can be represented cleanly as an integer
-        if (d == static_cast<int>(d)) {
-            return QVariant(static_cast<int>(d));
-        }
-        return QVariant(d);
-    }
-    if (JS_IsString(val)) {
-        size_t len;
-        const char *str = JS_ToCStringLen(ctx, &len, val);
-        QString qstr = QString::fromUtf8(str, static_cast<int>(len));
-        JS_FreeCString(ctx, str);
-        return QVariant(qstr);
-    }
-    
-    // Complex Structures (Arrays and Objects)
-    if (JS_IsObject(val)) {
-        if (JS_IsArray(val)) {
-            return QVariant(jsValueToQVariantList(ctx, val));
-        } else {
-            return QVariant(jsValueToQVariantMap(ctx, val));
-        }
-    }
-    
+QVariant jsValueToQVariant(JSContext *ctx, JSValueConst val) {
+  if (JS_IsNull(val) || JS_IsUndefined(val)) {
     return QVariant();
+  }
+  if (JS_IsBool(val)) {
+    return QVariant(static_cast<bool>(JS_ToBool(ctx, val)));
+  }
+  if (JS_IsNumber(val)) {
+    double d;
+    JS_ToFloat64(ctx, &d, val);
+    // Safely determine if it can be represented cleanly as an integer
+    if (d == static_cast<int>(d)) {
+      return QVariant(static_cast<int>(d));
+    }
+    return QVariant(d);
+  }
+  if (JS_IsString(val)) {
+    size_t len;
+    const char *str = JS_ToCStringLen(ctx, &len, val);
+    QString qstr = QString::fromUtf8(str, static_cast<int>(len));
+    JS_FreeCString(ctx, str);
+    return QVariant(qstr);
+  }
+
+  // Complex Structures (Arrays and Objects)
+  if (JS_IsObject(val)) {
+    if (JS_IsArray(val)) {
+      return QVariant(jsValueToQVariantList(ctx, val));
+    } else {
+      return QVariant(jsValueToQVariantMap(ctx, val));
+    }
+  }
+
+  return QVariant();
 }
 
 JSValue qvariantToJSValue(JSContext *ctx, const QVariant &var);
 
 JSValue qvariantMapToJSValue(JSContext *ctx, const QVariantMap &map) {
   JSValue jsObj = JS_NewObject(ctx);
-            
+
   QMapIterator<QString, QVariant> i(map);
   while (i.hasNext()) {
     i.next();
@@ -1818,7 +2003,7 @@ JSValue qvariantMapToJSValue(JSContext *ctx, const QVariantMap &map) {
 
 JSValue qvariantListToJSValue(JSContext *ctx, const QVariantList &list) {
   JSValue jsArray = JS_NewArray(ctx);
-            
+
   for (int i = 0; i < list.size(); ++i) {
     JSValue element = qvariantToJSValue(ctx, list.at(i));
     JS_SetPropertyUint32(ctx, jsArray, i, element);
@@ -1832,67 +2017,109 @@ JSValue qvariantToJSValue(JSContext *ctx, const QVariant &var) {
   }
 
   switch (var.typeId()) {
-    case QMetaType::Bool:
-      return JS_NewBool(ctx, var.toBool());
-            
-    case QMetaType::Int:
-    case QMetaType::UInt:
-      return JS_NewInt32(ctx, var.toInt());
-            
-    case QMetaType::LongLong:
-    case QMetaType::ULongLong:
-    case QMetaType::Double:
-      return JS_NewFloat64(ctx, var.toDouble());
-            
-    case QMetaType::QString: {
-      QByteArray utf8 = var.toString().toUtf8();
-      return JS_NewStringLen(ctx, utf8.constData(), utf8.size());
-    }
-        
-    case QMetaType::QVariantList: {
-      QVariantList list = var.toList();
-      return qvariantListToJSValue(ctx, list);
-    }
-        
-    case QMetaType::QVariantMap: {
-      QVariantMap map = var.toMap();
-      return qvariantMapToJSValue(ctx, map);
-    }
-        
-    default: {
-      QByteArray fallbackUtf8 = var.toString().toUtf8();
-      return JS_NewStringLen(ctx, fallbackUtf8.constData(), fallbackUtf8.size());
-    }
+  case QMetaType::Bool:
+    return JS_NewBool(ctx, var.toBool());
+
+  case QMetaType::Int:
+  case QMetaType::UInt:
+    return JS_NewInt32(ctx, var.toInt());
+
+  case QMetaType::LongLong:
+  case QMetaType::ULongLong:
+  case QMetaType::Double:
+    return JS_NewFloat64(ctx, var.toDouble());
+
+  case QMetaType::QString: {
+    QByteArray utf8 = var.toString().toUtf8();
+    return JS_NewStringLen(ctx, utf8.constData(), utf8.size());
+  }
+
+  case QMetaType::QVariantList: {
+    QVariantList list = var.toList();
+    return qvariantListToJSValue(ctx, list);
+  }
+
+  case QMetaType::QVariantMap: {
+    QVariantMap map = var.toMap();
+    return qvariantMapToJSValue(ctx, map);
+  }
+
+  default: {
+    QByteArray fallbackUtf8 = var.toString().toUtf8();
+    return JS_NewStringLen(ctx, fallbackUtf8.constData(), fallbackUtf8.size());
+  }
   }
 }
 
 template <> inline bool Value::is<QVariant>() const { return true; }
 
-template <> inline QVariant Value::as<QVariant>() const { 
+template <> inline QVariant Value::as<QVariant>() const {
   return jsValueToQVariant(ctx_, value_);
 }
-template <> inline void Value::assign_value<QVariant>(JSContext* ctx, QVariant value) { 
-  assign(ctx, qvariantToJSValue(ctx, value), true); 
+template <>
+inline void Value::assign_value<QVariant>(JSContext *ctx, QVariant value) {
+  assign(ctx, qvariantToJSValue(ctx, value), true);
 }
 
 template <> inline bool Value::is<QVariantMap>() const { return isObject(); }
 
-template <> inline QVariantMap Value::as<QVariantMap>() const { 
+template <> inline QVariantMap Value::as<QVariantMap>() const {
   return jsValueToQVariantMap(ctx_, value_);
 }
-template <> inline void Value::assign_value<QVariantMap>(JSContext* ctx, QVariantMap value) { 
-  assign(ctx, qvariantMapToJSValue(ctx, value), true); 
+template <>
+inline void Value::assign_value<QVariantMap>(JSContext *ctx,
+                                             QVariantMap value) {
+  assign(ctx, qvariantMapToJSValue(ctx, value), true);
 }
 
 template <> inline bool Value::is<QVariantList>() const { return isArray(); }
 
-template <> inline QVariantList Value::as<QVariantList>() const { 
+template <> inline QVariantList Value::as<QVariantList>() const {
   return jsValueToQVariantList(ctx_, value_);
 }
-template <> inline void Value::assign_value<QVariantList>(JSContext* ctx, QVariantList value) { 
-  assign(ctx, qvariantListToJSValue(ctx, value), true); 
+template <>
+inline void Value::assign_value<QVariantList>(JSContext *ctx,
+                                              QVariantList value) {
+  assign(ctx, qvariantListToJSValue(ctx, value), true);
 }
 
+template <typename T, std::enable_if_t<is_qtstring_or_derived<T>, int>>
+qjs::Value Map::get(T name) const {
+  return this->get(name.toStdString());
+};
+template <typename T, std::enable_if_t<is_qtstring_or_derived<T>, int>>
+bool Map::set(T name, qjs::Value value) {
+  return this->set(name.toStdString(), value);
+};
+
+template <typename V, typename T,
+          std::enable_if_t<is_qtstring_or_derived<T>, int>>
+bool Map::set(T name, V value) {
+  return this->set(name.toStdString(), value);
+};
+template <typename T, std::enable_if_t<is_qtstring_or_derived<T>, int>>
+bool Map::drop(T name) {
+  return this->drop(name.toStdString());
+};
+
+template <typename T, std::enable_if_t<is_qtstring_or_derived<T>, int>>
+qjs::Value Value::get(T name) const {
+  return this->get(name.toStdString());
+};
+template <typename T, std::enable_if_t<is_qtstring_or_derived<T>, int>>
+bool Value::set(T name, qjs::Value value) {
+  return this->set(name.toStdString(), value);
+};
+
+template <typename V, typename T,
+          std::enable_if_t<is_qtstring_or_derived<T>, int>>
+bool Value::set(T name, V value) {
+  return this->set(name.toStdString(), value);
+};
+template <typename T, std::enable_if_t<is_qtstring_or_derived<T>, int>>
+bool Value::drop(T name) {
+  return this->drop(name.toStdString());
+};
 
 #endif
 
