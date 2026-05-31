@@ -9,6 +9,14 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#ifdef QUICKJS_USE_QT
+#include <QString>
+#include <QVariant>
+#include <QVariantMap>
+#include <QVariantList>
+#endif
+
 namespace qjs {
 
 class Value;
@@ -486,9 +494,25 @@ public:
    * @param ctx QuickJS context.
    * @param value Double value to wrap.
    */
-  void assign(JSContext *ctx, double value) {
-    assign(ctx, JS_NewFloat64(ctx, value), true);
+  template <typename T, std::enable_if_t<  
+    std::is_convertible_v<T, double> &&  
+    !std::is_same_v<T, bool> 
+  , int> = 0>
+  void assign(JSContext *ctx, T value) {
+    assign(ctx, JS_NewFloat64(ctx, (double)value), true);
   }
+
+
+  /**
+   * @brief Assigns a numeric value.
+   *
+   * @param ctx QuickJS context.
+   * @param value Double value to wrap.
+   */
+  void assign(JSContext *ctx, bool value) {
+    assign(ctx, JS_NewBool(ctx, value), true);
+  }
+
 
   /**
    * @brief Assigns a string value.
@@ -530,6 +554,22 @@ public:
   template <typename T, std::enable_if_t<is_template_function<T>, int> = 0>
   void assign(JSContext *ctx, T value) {
     assign(ctx, newFunctionValue(ctx, value).rawdup(), true); // consumes v
+  }
+
+  template <typename T>
+  void assign_value(JSContext *ctx, T value);
+
+
+  template <typename T, std::enable_if_t<
+    !is_template_function<T> &&
+    !std::is_convertible_v<T, std::function<Value(Value *, Array *)>> &&  
+    !std::is_convertible_v<T, Function*> &&  
+    !std::is_convertible_v<T, const std::string &> &&  
+    !std::is_convertible_v<T, double> &&  
+    !std::is_convertible_v<T, bool> 
+  , int> = 0>
+  void assign(JSContext *ctx, T value) {
+    assign_value(ctx, value); // consumes v
   }
 
   /**
@@ -773,6 +813,10 @@ public:
 
   ClassID getClassID() { return JS_GetClassID(value_); }
 
+  void * asOpaque() { return as(getClassID()); }
+
+  bool isOpaque() { return is(getClassID()); }
+
   template <typename T> bool is() const;
 
   template <typename T> T as() const;
@@ -789,7 +833,7 @@ public:
 
   bool isString() const { return JS_IsString(raw()); }
 
-  bool isObject() const { return JS_IsObject(raw()); }
+  bool isObject() const { return JS_IsObject(raw()) && !isArray(); }
 
   bool isFunction() const { return JS_IsFunction(context(), raw()); }
 
@@ -1485,6 +1529,7 @@ template <> inline bool Value::is<std::vector<Value>>() const {
   return isArray();
 }
 
+
 template <> inline bool Value::is<std::map<std::string, Value>>() const {
   return isObject();
 }
@@ -1666,5 +1711,189 @@ void throw_qjs_exception( // NOLINT(misc-definitions-in-headers)
     auto method = qjs::wrap_method(func, ctx_);
     return set(name, method);
   }
+
+
+#ifdef QUICKJS_USE_QT
+template <> inline bool Value::is<QString>() const { return isString(); }
+template <> inline QString Value::as<QString>() const { return QString::fromStdString(as<std::string>()); }
+template <> inline void Value::assign_value<QString>(JSContext* ctx, QString value) { assign(ctx, value.toStdString()); }
+
+QVariant jsValueToQVariant(JSContext *ctx, JSValueConst val);
+
+QVariantMap jsValueToQVariantMap(JSContext * ctx, JSValueConst val){
+  QVariantMap map;
+  if (JS_IsObject(val)) {
+    if (!JS_IsArray(val)) {
+      JSPropertyEnum *props = nullptr;
+      uint32_t propCount = 0;    
+      if (JS_GetOwnPropertyNames(ctx, &props, &propCount, val, JS_GPN_STRING_MASK | JS_GPN_SYMBOL_MASK) >= 0) {
+        for (uint32_t i = 0; i < propCount; ++i) {
+          JSAtom atom = props[i].atom;
+          const char *keyStr = JS_AtomToCString(ctx, atom);
+                    
+          JSValue propVal = JS_GetProperty(ctx, val, atom);
+          map.insert(QString::fromUtf8(keyStr), jsValueToQVariant(ctx, propVal));
+                    
+          JS_FreeValue(ctx, propVal);
+          JS_FreeCString(ctx, keyStr);
+          JS_FreeAtom(ctx, atom);
+        }
+        js_free(ctx, props);
+      }
+    }
+  }
+  return map;
+}
+
+QVariantList jsValueToQVariantList(JSContext * ctx, JSValueConst val){
+  QVariantList list;
+  if (JS_IsObject(val)) {
+    if (JS_IsArray(val)) {
+            
+      JSValue lenVal = JS_GetPropertyStr(ctx, val, "length");
+      int64_t length = 0;
+      JS_ToInt64(ctx, &length, lenVal);
+      JS_FreeValue(ctx, lenVal);
+            
+      for (int64_t i = 0; i < length; ++i) {
+        JSValue element = JS_GetPropertyUint32(ctx, val, i);
+        list.append(jsValueToQVariant(ctx, element));
+        JS_FreeValue(ctx, element); // Decrement reference count
+      }
+    }
+  }
+  return list;
+}
+
+QVariant jsValueToQVariant(JSContext *ctx, JSValueConst val) {    
+    if (JS_IsNull(val) || JS_IsUndefined(val)) {
+        return QVariant();
+    }
+    if (JS_IsBool(val)) {
+        return QVariant(static_cast<bool>(JS_ToBool(ctx, val)));
+    }
+    if (JS_IsNumber(val)) {
+        double d;
+        JS_ToFloat64(ctx, &d, val);
+        // Safely determine if it can be represented cleanly as an integer
+        if (d == static_cast<int>(d)) {
+            return QVariant(static_cast<int>(d));
+        }
+        return QVariant(d);
+    }
+    if (JS_IsString(val)) {
+        size_t len;
+        const char *str = JS_ToCStringLen(ctx, &len, val);
+        QString qstr = QString::fromUtf8(str, static_cast<int>(len));
+        JS_FreeCString(ctx, str);
+        return QVariant(qstr);
+    }
+    
+    // Complex Structures (Arrays and Objects)
+    if (JS_IsObject(val)) {
+        if (JS_IsArray(val)) {
+            return QVariant(jsValueToQVariantList(ctx, val));
+        } else {
+            return QVariant(jsValueToQVariantMap(ctx, val));
+        }
+    }
+    
+    return QVariant();
+}
+
+JSValue qvariantToJSValue(JSContext *ctx, const QVariant &var);
+
+JSValue qvariantMapToJSValue(JSContext *ctx, const QVariantMap &map) {
+  JSValue jsObj = JS_NewObject(ctx);
+            
+  QMapIterator<QString, QVariant> i(map);
+  while (i.hasNext()) {
+    i.next();
+    QByteArray keyUtf8 = i.key().toUtf8();
+    JSValue propVal = qvariantToJSValue(ctx, i.value());
+    JS_SetPropertyStr(ctx, jsObj, keyUtf8.constData(), propVal);
+  }
+  return jsObj;
+}
+
+JSValue qvariantListToJSValue(JSContext *ctx, const QVariantList &list) {
+  JSValue jsArray = JS_NewArray(ctx);
+            
+  for (int i = 0; i < list.size(); ++i) {
+    JSValue element = qvariantToJSValue(ctx, list.at(i));
+    JS_SetPropertyUint32(ctx, jsArray, i, element);
+  }
+  return jsArray;
+}
+
+JSValue qvariantToJSValue(JSContext *ctx, const QVariant &var) {
+  if (!var.isValid() || var.isNull()) {
+    return JS_NULL;
+  }
+
+  switch (var.typeId()) {
+    case QMetaType::Bool:
+      return JS_NewBool(ctx, var.toBool());
+            
+    case QMetaType::Int:
+    case QMetaType::UInt:
+      return JS_NewInt32(ctx, var.toInt());
+            
+    case QMetaType::LongLong:
+    case QMetaType::ULongLong:
+    case QMetaType::Double:
+      return JS_NewFloat64(ctx, var.toDouble());
+            
+    case QMetaType::QString: {
+      QByteArray utf8 = var.toString().toUtf8();
+      return JS_NewStringLen(ctx, utf8.constData(), utf8.size());
+    }
+        
+    case QMetaType::QVariantList: {
+      QVariantList list = var.toList();
+      return qvariantListToJSValue(ctx, list);
+    }
+        
+    case QMetaType::QVariantMap: {
+      QVariantMap map = var.toMap();
+      return qvariantMapToJSValue(ctx, map);
+    }
+        
+    default: {
+      QByteArray fallbackUtf8 = var.toString().toUtf8();
+      return JS_NewStringLen(ctx, fallbackUtf8.constData(), fallbackUtf8.size());
+    }
+  }
+}
+
+template <> inline bool Value::is<QVariant>() const { return true; }
+
+template <> inline QVariant Value::as<QVariant>() const { 
+  return jsValueToQVariant(ctx_, value_);
+}
+template <> inline void Value::assign_value<QVariant>(JSContext* ctx, QVariant value) { 
+  assign(ctx, qvariantToJSValue(ctx, value), true); 
+}
+
+template <> inline bool Value::is<QVariantMap>() const { return isObject(); }
+
+template <> inline QVariantMap Value::as<QVariantMap>() const { 
+  return jsValueToQVariantMap(ctx_, value_);
+}
+template <> inline void Value::assign_value<QVariantMap>(JSContext* ctx, QVariantMap value) { 
+  assign(ctx, qvariantMapToJSValue(ctx, value), true); 
+}
+
+template <> inline bool Value::is<QVariantList>() const { return isArray(); }
+
+template <> inline QVariantList Value::as<QVariantList>() const { 
+  return jsValueToQVariantList(ctx_, value_);
+}
+template <> inline void Value::assign_value<QVariantList>(JSContext* ctx, QVariantList value) { 
+  assign(ctx, qvariantListToJSValue(ctx, value), true); 
+}
+
+
+#endif
 
 } // namespace qjs
