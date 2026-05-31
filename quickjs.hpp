@@ -236,6 +236,7 @@ template <typename Ret, typename Base, typename... Args>
 struct callable_traits<Ret (Base::*)(Args...) const> {
   using return_type = Ret;
   using args_tuple = std::tuple<Args...>;
+  using base_type = Base;
   static constexpr size_t args_count = sizeof...(Args);
 };
 
@@ -1600,7 +1601,7 @@ public:
   template <typename T>
   qjs::Value newConstructor(T fn, const qjs::Value &proto) {
     auto func = newFunction(fn);
-    func.setConstructor(proto);
+    func.makeConstructor(proto);
     return func;
   }
 
@@ -1692,16 +1693,21 @@ private:
   bool owned = true;
   void free() {
     if (owned) {
-      if (ctx_ != nullptr) {
-        void *data = JS_GetContextOpaque(ctx_);
-        JS_FreeContext(ctx_);
-        finalize_pointer(data);
-      }
       if (rt_ != nullptr) {
         void *data = JS_GetRuntimeOpaque(rt_);
-        JS_FreeRuntime(rt_);
+        JS_SetRuntimeOpaque(rt_, nullptr);
         finalize_pointer(data);
       }
+
+      if (ctx_ != nullptr) {
+        void *data = JS_GetContextOpaque(ctx_);
+        JS_SetContextOpaque(ctx_, nullptr);
+        finalize_pointer(data);
+      }
+
+
+   //   if (rt_ != nullptr)  JS_FreeRuntime(rt_);
+      if (ctx_ != nullptr)  JS_FreeContext(ctx_);
     }
   }
 };
